@@ -1,0 +1,204 @@
+Description
+-----------
+
+Rdopt is a program to generate customized DCT quantization
+tables for use in JPEG compression. The input is an image
+file (raw row-major bytes or pgm or ppm). The program runs an
+optimization algorithm and then prompts the user to enter
+compression or SNR/PSNR specifications whereupon it outputs
+a Quantization Table that when used in JPEG compression with
+customized Huffman Tables (eg., Independent JPEG group's
+cjpeg program with the options cjpeg -optimize -qtables <Q-FILE>)
+compresses the image to within those specifications optimally.
+
+Usage
+-----
+
+rdopt [flags] {-im imfile [image_flags] | -hist histfile}
+where,
+flags can be:
+
+	 -v: verbose output: the more -v's, the more verbose the output
+	 -silent: Normal stderr output will be suppressed
+	 -cmdfile cfile: after optimization, read commands from cfile instead of stdin
+	 -height H: nominal height of the image is H (default 512)
+	 -width W: nominal width of the image is W (default 512)
+	 -planes N: there are N color planes in the image (default 1)
+	            these color planes are numbered 0..(N-1)
+	 -numtables t: t tables will be used for quantization.
+	               1 table each for color planes numbered 0..(t-2)
+	               Color planes numbered (t-1) thru (N-1) will be
+	               quantized together
+	 -clampDC d: don't consider qtable entries greater than d
+	             for the DC coefficient (default 12)
+	 -dontclampDC: consider all qtable entries for DC too
+	 -bppmax b: consider bits per pixel values upto b (default 1.0)
+	 -bppscale B: discretize bpp by the integer B (default 5000)
+	              the slowness of the program grows linearly with b*B
+		      INCREASE bppscale for better performance.
+	 -weights cwfile: the errors in various DCT coefficients
+	                  are to be weighted according to the weights
+	                  listed in RMWSS order in cwfile. these weights
+	                  will be normalized so that they add to 1
+	                  Useful for using perceptually weighted distortion measures
+	 -subsamp n h w: plane number n is to be subsampled to height H/h and 
+	                 width W/w. defaults are h=w=1 for each plane.
+	 -insubsamp n h w: plane number n in input file has height H/h and 
+	                 width W/w. defaults are h=w=1 for each
+	                 plane. H(W) must be divisible by h(w)
+	 -mintable n fname: qtable # n has to have entries no lesser
+	                    than those in the table listed in
+	                    row-major white-space-separated (RMWSS)
+	                    order in the file fname
+	 -maxtable n fname: qtable # n has to have entries no more
+	                    than those in the table listed in
+	                    RMWSS order in the file fname
+	 -plot pfile: dump a plot of bpp-psnr pairs in the
+	              file pfile. pfile can be - indicating stdout.
+
+	 ** Obscure flags that you shouldn't really need:
+
+	 -bppdist n fname: qtable # n has to have entries which give bpp
+	                   for each coeff in the range specified as
+	                   minbpp:maxbpp in RMWSS order in the file fname
+	 -stats: histograms will be dumped in the file HISTOGRAM
+	 -onlystats: only histogram-dumping, no optimization
+	 -mapq: qentries tried will increase logarithmically
+	        This is useful for speeding up rdopt with 12+ bit samples
+
+** Either the -im flag or the -hist flag must be present. In case
+of -hist, the file histfile must contain a histogram generated
+by rdopt -stats or -onlystats. You shouldn't need to use this option,
+really.  If the image file name is given as -, it means the image 
+is to be read from stdin.
+The image file can be raw row-major bytes (or 16-bits for
+10- 12- and 16-bit images) with color planes stored one after
+the other. In this case, the -height, -width, -planes, and -insubsamp
+options must have been correctly set whenever they differ from
+the default values. OR, the image can be in pgm or ppm format
+in which csae none of these options need to be set as their values
+will be read from the image file
+
+** Image_flags can be:
+	 -rgbtoycc: the input image is in RGB color format. these are
+	              to be converted to YCrCb before use
+	 -rgbto2ycc: convert RGB to YCbCr, subsample 2:1 in horiz and
+	             vert directions for Cb and Cr planes
+
+
+
+Command Interface
+-----------------
+
+After the optimization algorithm is done running, rdopt
+prompts the user with
+
+Command>
+
+unless the -cmdfile option was used in which case commands are read
+from the file named in that option.
+Valid commands are:
+
+     size <target_size> [<unit_num>]
+       output Q to get compressed size <= target_size bytes
+
+     bpp <target_bpp> [<unit_num>]
+       output Q to get compressed size <= target_bpp bits per pixel
+
+     psnr <target_psnr> [<unit_num>]
+       output Q to get psnr >= target_psnr dB
+
+     snr <target_snr> [<unit_num>]
+       output Q to get snr >= target_snr dB
+
+     rmse <target_rmse> [<unit_num>]
+       output Q to get rmse <= target_rmse 
+
+     qfile fname
+       output the next qtable generated by a command to the file fname
+       instead of the default file name (explained below)
+
+  A file RDOPT.Q.<command>.<target>[.<unit_num>] will be generated
+  (unless a qfile command has been issued after the last command)
+
+What is unit_num??
+  A unit_num can be specified in the above commands. This is
+  a number between 0 and (t-1) where t is the number of units
+  in the image. Each unit is a set of color planes quantized
+  with the same qtable. If unit_num is specified, only a qtable
+  for that unit will be outputted (meeting snr/psnr/bpp/size/rmse
+  constraint for that unit only). Otherwise, qtables for each
+  unit will be generated so that the given snr/psnr/rmse/size/bpp
+  constraint is met for the whole image (all planes).
+
+  Examples:
+
+  rdopt -numtables 2 -im lena.ppm -rgbto2ycc
+
+    Here, there are three color planes (Y, Cb, Cr) and
+    two units. Unit # 0 consists of the Y plane and
+    Unit # 1 consists of the Cb and Cr planes.
+
+  rdopt -im lena.pgm
+
+    Here, there is just one plane, and one unit.
+
+  rdopt -planes 5 -numtables 3 -height 120 -width 120 -im some.raw.image
+
+    Here, there are 5 color planes and 3 units. Unit # i has
+    only the color plane # i, for i=0,1. Unit # 2 consists of
+    color planes #2, #3, and #4.
+
+Accuracy of results
+-------------------
+
+The psnr/snr/rmse values predicted by rdopt are *very* accurate.
+The bpp predicted are usually within 0.02 bits per pixel of the
+actual rate achieved by any good jpeg compressor using customized
+huffman tables.
+
+Using the generated Q tables
+----------------------------
+
+The Q tables can be used directly by the cjpeg program of the
+Independent JPEG group. For example,
+
+rdopt -im lena.pgm
+
+Command> qfile tab1
+Command> bpp 1.0
+Command> quit
+
+can be followd with
+
+cjpeg -dct float -optimize -qtables tab1 lena.pgm > lena.jpg
+
+We recommend the use of -dct float and -optimize options in
+the cjpeg program, for accuracy of the psnr/bpp predicted by
+rdopt.
+
+
+10- 12- and 16- bit images
+--------------------------
+
+rdopt can be compiled for these images too, by changing
+SAMPLEBITS and QTABBITS in precision.h
+These images can only be in the raw form, stored as
+2 bytes per pixel.
+
+For 12- and 16- bit images it's advisable to use -mapq
+option for greater speed.
+
+
+Comments, Suggestions, Bugs
+----------------------------
+
+Please send email to
+
+ratnakar@cs.wisc.edu
+
+Viresh Ratnakar
+Computer Sciences Dept
+1210 W Dayton St
+Madison, WI 53706
+
