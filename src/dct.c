@@ -1,5 +1,6 @@
+
 /*
-** Copyright 1995 by Viresh Ratnakar, Miron Livny
+** Copyright 1995,1996 by Viresh Ratnakar, Miron Livny
 **
 ** Permission to use and copy this software and its documentation
 ** for any non-commercial purpose and without fee is hereby granted,
@@ -31,7 +32,7 @@
 
 
 
-#define C(x) (((x) == 0) ? ((FFLOAT) 0.70710678) : ((FFLOAT) 1.0))
+#define C(x) (((x) == 0) ? ((FFLOAT) M_SQRT1_2) : ((FFLOAT) 1.0))
 
 #include "CosTable.h"
 
@@ -53,14 +54,14 @@ static int IJtoWhere(int i, int j, int height, int width)
 #define Linearize(i,j,w) (((i)*(w))+(j))
 
 
-
 static int LastDC = 0;
 static boolean LastDCwasPos = TRUE;
 
 static void BlockStats(Pixel *image, int height, int width, boolean ErrImg,
-                       int where_i, int where_j, Hist *H, FFLOAT *mssq)
+                       int where_i, int where_j, Hist *H, FFLOAT *mssq,
+                       FFLOAT *SigTab, boolean UseDCDPCM)
 {
-    int ip,jp,ic,jc,lowip,lowjp,loc;
+    int nc,ip,jp,ic,jc,lowip,lowjp,loc;
     FFLOAT sum, coef;
     int intcoef,temp;
     boolean positive;
@@ -81,9 +82,10 @@ static void BlockStats(Pixel *image, int height, int width, boolean ErrImg,
             }
         }
 
+        nc = 0;
         for (ic=0; ic<8; ic++)
         {
-            for (jc=0; jc<8; jc++)
+            for (jc=0; jc<8; jc++,nc++)
             {
                 sum = ((FFLOAT) 0.0);
                 for (ip=lowip; ip<8+lowip; ip++)
@@ -96,25 +98,30 @@ static void BlockStats(Pixel *image, int height, int width, boolean ErrImg,
                     }
                 }
                 coef = sum * (0.25) * C(ic) * C(jc);
-                if ((jc == 0) && (ic == 0) && (!ErrImg))
+                SigTab[nc] += (coef*coef);
+                if ((nc == 0) && (!ErrImg))
                 {
                     coef = coef - ZERO_CORRECTION;
-                    btemp = TRUE;
-                    if (coef < 0.0) btemp = FALSE;
-                    temp = Discretize(coef);
-                    coef = coef - UnDiscretize(LastDC, LastDCwasPos);
-                    LastDC = temp;
-                    LastDCwasPos = btemp;
+                    if (UseDCDPCM)
+                    {
+                        btemp = TRUE;
+                        if (coef < 0.0) btemp = FALSE;
+                        temp = Discretize(coef);
+                        coef = coef - UnDiscretize(LastDC, LastDCwasPos);
+                        LastDC = temp;
+                        LastDCwasPos = btemp;
+                    }
                 }
                 positive = TRUE;
                 if (coef < 0.0) positive = FALSE;
                 intcoef = Discretize(coef);
-                HistIncrCount(H,((ic<<3)+jc),intcoef,positive);
+                HistIncrCount(H,nc,intcoef,positive);
             }
         }
     }
     else
     {
+
 
         for (ip=lowip; ip<8+lowip; ip++)
         {
@@ -125,9 +132,10 @@ static void BlockStats(Pixel *image, int height, int width, boolean ErrImg,
             }
         }
 
+        nc = 0;
         for (ic=0; ic<8; ic++)
         {
-            for (jc=0; jc<8; jc++)
+            for (jc=0; jc<8; jc++,nc++)
             {
                 sum = ((FFLOAT) 0.0);
                 for (ip=lowip; ip<8+lowip; ip++)
@@ -140,20 +148,24 @@ static void BlockStats(Pixel *image, int height, int width, boolean ErrImg,
                     }
                 }
                 coef = sum * (0.25) * C(ic) * C(jc);
-                if ((jc == 0) && (ic == 0) && (!ErrImg))
+                SigTab[nc] += (coef*coef);
+                if ((nc == 0)  && (!ErrImg))
                 {
                     coef = coef - ZERO_CORRECTION;
-                    btemp = TRUE;
-                    if (coef < 0.0) btemp = FALSE;
-                    temp = Discretize(coef);
-                    coef = coef - UnDiscretize(LastDC, LastDCwasPos);
-                    LastDC = temp;
-                    LastDCwasPos = btemp;
+                    if (UseDCDPCM)
+                    {
+                        btemp = TRUE;
+                        if (coef < 0.0) btemp = FALSE;
+                        temp = Discretize(coef);
+                        coef = coef - UnDiscretize(LastDC, LastDCwasPos);
+                        LastDC = temp;
+                        LastDCwasPos = btemp;
+                    }
                 }
                 positive = TRUE;
                 if (coef < 0.0) positive = FALSE;
                 intcoef = Discretize(coef);
-                HistIncrCount(H,((ic<<3)+jc),intcoef,positive);
+                HistIncrCount(H,nc,intcoef,positive);
             }
         }
     }
@@ -161,11 +173,14 @@ static void BlockStats(Pixel *image, int height, int width, boolean ErrImg,
 
 
 
-extern void SetHistogram(Hist *H, Image *Im, int cnum, FFLOAT *mssq)
+extern void SetHistogram(Hist *H, Image *Im, int cnum, FFLOAT *mssq,
+                         FFLOAT *SigTab, boolean UseDCDPCM)
 {
     int i,j,imax,jmax,h,w;
+
     LastDC = 0;
     LastDCwasPos = TRUE;
+
     h = Im->NumRows/Im->OutSamplingFactor[cnum][0];
     w = Im->NumCols/Im->OutSamplingFactor[cnum][1];
     imax = h/8;
@@ -173,11 +188,13 @@ extern void SetHistogram(Hist *H, Image *Im, int cnum, FFLOAT *mssq)
     jmax = w/8;
     if ((jmax << 3) != w) jmax++;
 
+
     for (i=0; i<imax; i++)
     {
         for (j=0; j<jmax; j++)
         {
-            BlockStats(Im->Im[cnum], h, w, Im->IsErrImage, i, j, H, mssq);
+            BlockStats(Im->Im[cnum], h, w, Im->IsErrImage, i, j, H, mssq,
+                       SigTab, UseDCDPCM);
         }
     }
 }

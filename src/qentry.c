@@ -1,5 +1,6 @@
+
 /*
-** Copyright 1995 by Viresh Ratnakar, Miron Livny
+** Copyright 1995,1996 by Viresh Ratnakar, Miron Livny
 **
 ** Permission to use and copy this software and its documentation
 ** for any non-commercial purpose and without fee is hereby granted,

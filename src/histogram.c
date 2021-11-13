@@ -1,5 +1,6 @@
+
 /*
-** Copyright 1995 by Viresh Ratnakar, Miron Livny
+** Copyright 1995,1996 by Viresh Ratnakar, Miron Livny
 **
 ** Permission to use and copy this software and its documentation
 ** for any non-commercial purpose and without fee is hereby granted,
@@ -272,3 +273,29 @@ extern FFLOAT GetTotalBlocks(Hist *H)
 
     return(count);
 }
+
+extern void SetSignal(Hist *H, FFLOAT *Sig)
+{
+    int n,v;
+    FFLOAT temp;
+
+    for (n=0; n<64; n++)
+    {
+
+        Sig[n] = ((FFLOAT) 0.0);
+
+        for (v=1-H[n].MinusSize; v<=0; v++)
+        {
+            temp = UnDiscretizeMinus(v);
+            Sig[n] += temp * temp * ((FFLOAT) H[n].MinusCount[0-v]);
+        }
+
+        for (v=H[n].PlusSize-1; v>=0; v--)
+        {
+            temp = UnDiscretizePlus(v);
+            Sig[n] += temp * temp * ((FFLOAT) H[n].PlusCount[v]);
+        }
+
+    }
+}
+

@@ -1,5 +1,6 @@
+
 /*
-** Copyright 1995 by Viresh Ratnakar, Miron Livny
+** Copyright 1995,1996 by Viresh Ratnakar, Miron Livny
 **
 ** Permission to use and copy this software and its documentation
 ** for any non-commercial purpose and without fee is hereby granted,
@@ -45,18 +46,25 @@ extern void Usage(void)
     printf("\t -numtables t: t tables will be used for quantization.\n");
     printf("\t               1 table each for color planes numbered 0..(t-2)\n");
     printf("\t               Color planes numbered (t-1) thru (N-1) will be\n");
-    printf("\t               quantized together\n");
+    printf("\t               quantized together. (default 1)\n");
     printf("\t -clampDC d: don't consider qtable entries greater than d\n");
-    printf("\t             for the DC coefficient (default 12)\n");
+    printf("\t             for the DC coefficient (default 255 or QTABENTRYMAX for >8-bit prec)\n");
     printf("\t -dontclampDC: consider all qtable entries for DC too\n");
+    printf("\t -dcdpcm:  use an approximation of dpcm coding done for\n");
+    printf("\t            the DC coef to estimate its entropy.\n");
     printf("\t -bppmax b: consider bits per pixel values upto b (default 1.0)\n");
     printf("\t -bppscale B: discretize bpp by the integer B (default 5000)\n");
     printf("\t              the slowness of the program grows linearly with b*B\n");
-    printf("\t -weights cwfile: the errors in various DCT coefficients\n");
+    printf("\t -thresh T: try thresholds upto T/2 greater than q/2. (default 0)\n");
+    printf("\t -weights n cwfile: for unit n, the errors in various DCT coefficients\n");
     printf("\t                  are to be weighted according to the weights\n");
     printf("\t                  listed in RMWSS order in cwfile. these weights\n");
-    printf("\t                  will be normalized so that they add to 1\n");
+    printf("\t                  will be normalized so that they add to 64\n");
     printf("\t                  Useful for using perceptually weighted distortion measures\n");
+    printf("\t -pweights w0[,w1,..]: for aggregate error,  unit n\n");
+    printf("\t               will have weight wn. Missing weights will be set\n");
+    printf("\t               to the last specified weight. weights will be\n");
+    printf("\t               normalized to add up to numtables\n");
     printf("\t -subsamp n h w: color plane number n is to be subsampled to height H/h and \n");
     printf("\t                 width W/w. defaults are h=w=1 for each\n");
     printf("\t                 color plane.\n");
@@ -70,12 +78,17 @@ extern void Usage(void)
     printf("\t -maxtable n fname: qtable # n has to have entries no more\n");
     printf("\t                    than those in the table listed in\n");
     printf("\t                    RMWSS order in the file fname\n");
+    printf("\t -correct c: find actual bpp at predicted-bpp-c, apply correction thereafter\n");
     printf("\t -plot pfile: dump a plot of bpp-psnr pairs in the\n");
     printf("\t              file pfile\n");
+    printf("\t -points n: use n points in -plot (default 20)\n");
+    printf("\t -pbppmax b: plot bpp range 0-b (default min of bppmax,1.5)\n");
+    printf("\t -bppplane n: useful for images with > 1 planes. Use plane\n");
+    printf("\t             number n to calculate # of pixels for reporting\n");
+    printf("\t             bits per pixel. Default is to use the sum of\n");
+    printf("\t           #pixels in each plane\n");
+    printf("\t -errfile fname: send stderr to file fname (can be - for stdout)\n");
     printf("\n\t ** Obscure flags that you shouldn't really need:\n\n");
-    printf("\t -bppdist n fname: qtable # n has to have entries which give bpp\n");
-    printf("\t                   for each coeff in the range specified as\n");
-    printf("\t                   minbpp:maxbpp in RMWSS order in the file fname\n");
     printf("\t -stats: histograms will be dumped in the file HISTOGRAM\n");
     printf("\t -onlystats: only histogram-dumping, no optimization\n");
     printf("\t -mapq: qentries tried will increase logarithmically\n");
@@ -106,11 +119,12 @@ extern void BriefUsage(void)
 
     printf("rdopt [flags] {-im imfile [image_flags] | -hist histfile}\n");
     printf("  flags can be:\n");
-    printf("	 [-v] [-silent] [-cmdfile cfile] [-height H] [-width W]\n");
-    printf("	 [-planes N] [-numtables t] [-clampDC d] [-dontclampDC]\n");
-    printf("	 [-bppmax b] [-bppscale B] [-weights cwfile] [-subsamp n h w]\n");
+    printf("	 [-v] [-silent] [-cmdfile cfile] [-height H] [-width W] [-correct c]\n");
+    printf("	 [-planes N] [-numtables t] [-clampDC d] [-dontclampDC] [-pweights w0,..]\n");
+    printf("	 [-bppmax b] [-bppscale B] [-weights n cwfile] [-subsamp n h w]\n");
     printf("	 [-insubsamp n h w] [-mintable n fname] [-maxtable n fname]\n");
-    printf("	 [-plot pfile] [-help]\n");
+    printf("	 [-plot pfile] [-points n] [-pbppmax b] [-dcdpcm]\n");
+    printf("       [-bppplane n] [-errfile fname] [-thresh T] [-help]\n");
     printf("  image_flags can be:\n");
     printf("	 [-rgbtoycc] [-rgbto2ycc]\n");
 

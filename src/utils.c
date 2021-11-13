@@ -1,5 +1,6 @@
+
 /*
-** Copyright 1995 by Viresh Ratnakar, Miron Livny
+** Copyright 1995,1996 by Viresh Ratnakar, Miron Livny
 **
 ** Permission to use and copy this software and its documentation
 ** for any non-commercial purpose and without fee is hereby granted,
@@ -36,6 +37,18 @@
 #include <limits.h>
 
 #include "rdopt.h"
+
+static int ZigZagToN[64] =
+{
+    0, 1, 8, 16, 9, 2, 3, 10,
+    17, 24, 32, 25, 18, 11, 4, 5,
+    12, 19, 26, 33, 40, 48, 41, 34,
+    27, 20, 13, 6, 7, 14, 21, 28,
+    35, 42, 49, 56, 57, 50, 43, 36,
+    29, 22, 15, 23, 30, 37, 44, 51,
+    58, 59, 52, 45, 38, 31, 39, 46,
+    53, 60, 61, 54, 47, 55, 62, 63,
+};
 
 extern int newline(char s[], FILE *fp)
 {
@@ -74,19 +87,8 @@ extern int newlinefd(char s[], int fd)
 
 extern void FatalError(char *s)
 {
-    fprintf(stderr,"%s\n",s);
+    fprintf(errfile,"%s\n",s);
     exit(1);
-}
-
-
-extern void ReadIntTable(FILE *fp, int *tab)
-{
-    int n;
-    for (n=0; n<64; n++)
-    {
-        if (fscanf(fp,"%d",&tab[n]) == EOF)
-            FatalError("Could not read table off file");
-    }
 }
 
 
@@ -102,16 +104,68 @@ extern void ReadRealTable(FILE *fp, FFLOAT *tab)
     }
 }
 
-extern void WriteIntTable(FILE *fp, int *tab)
+extern void WriteIntTable(FILE *fp, int *tab, char *prefix)
 {
     int i,j;
     for (i=0; i<8; i++)
     {
+        fprintf(fp,"%s",prefix);
         for (j=0; j<8; j++)
         {
             fprintf(fp,"%d ",tab[(i<<3)+j]);
         }
         fprintf(fp,"\n");
+    }
+}
+
+extern void WriteThreshTable(FILE *fp, int *tab, char *prefix)
+{
+    int i,j;
+
+    fprintf(fp,"# Table of thresholds\n");
+    for (i=0; i<8; i++)
+    {
+        fprintf(fp,"%s",prefix);
+        for (j=0; j<8; j++)
+        {
+            fprintf(fp,"%5.1f ", ((float) tab[(i<<3)+j])/2.0);
+        }
+        fprintf(fp,"\n");
+    }
+}
+
+extern void WriteErrFBppDist(FILE *fp, FFLOAT *bpptab,
+                             FFLOAT *errtab, char *prefix)
+{
+    int n, zn;
+
+    fprintf(fp,"# Rate-Distortion distribution\n");
+    fprintf(fp,"# ZigZagIndex CumulativeBpp   RMSE       PSNR\n");
+    for (n=0; n<64; n++)
+    {
+        zn = ZigZagToN[n];
+        fprintf(fp,"%s",prefix);
+        fprintf(fp,"%2d             %7.6lf    %7.3lf %6.2lf\n",
+                n, ((double) bpptab[zn]),
+                sqrt((double) errtab[zn]),
+                ((double) 10.0*log10(((double) 65025.0)/((double) errtab[zn]))));
+    }
+}
+extern void WriteErrBppDist(FILE *fp, int bppscale, int *bpptab,
+                            FFLOAT *errtab, char *prefix)
+{
+    int n, zn;
+
+    fprintf(fp,"# Rate-Distortion distribution\n");
+    fprintf(fp,"# ZigZagIndex CumulativeBpp   RMSE       PSNR\n");
+    for (n=0; n<64; n++)
+    {
+        zn = ZigZagToN[n];
+        fprintf(fp,"%s",prefix);
+        fprintf(fp,"%2d             %7.6lf    %7.3lf %6.2lf\n",
+                n, ((double) bpptab[zn])/((double) bppscale),
+                sqrt((double) errtab[zn]),
+                ((double) 10.0*log10(((double) 65025.0)/((double) errtab[zn]))));
     }
 }
 
@@ -124,6 +178,68 @@ extern boolean NotEqualReal(FFLOAT x, FFLOAT y)
     if (diff < 0.0) diff = 0.0 - diff;
     if (diff <= EQUALITY_DELTA) return(FALSE);
     else return(TRUE);
+}
+
+
+
+extern void ReadIntTable(FILE *fp, int *tab)
+{
+    int j,k,l;
+    char nextline[STRLENMAX], lilbuff[20];
+
+    j = 0;
+
+    while (newline(nextline,fp) != EOF)
+    {
+        if (!strncmp(nextline,"#END",4)) break;
+        if (nextline[0] == '#') continue;
+        k = 0;
+        while (nextline[k] != '\0')
+        {
+            if ((nextline[k] >= '0') && (nextline[k] <= '9'))
+            {
+                l = 0;
+                while ((nextline[k] >= '0') && (nextline[k] <= '9'))
+                {
+                    lilbuff[l] = nextline[k];
+                    l++;
+                    k++;
+                }
+                lilbuff[l] = '\0';
+                tab[j] = atoi(lilbuff);
+                j++;
+                if (j == 64) break;
+            }
+            else k++;
+        }
+    }
+    if (j != 64) FatalError("Could not read table of integers");
+}
+
+extern void SigToRemainingSig(FFLOAT *Sig, FFLOAT *RemainingSig)
+{
+    int i;
+
+    RemainingSig[ZigZagToN[63]] = ((FFLOAT) 0.0);
+    for (i=62; i>=0; i--)
+        RemainingSig[ZigZagToN[i]]
+            = Sig[ZigZagToN[i+1]]
+              + RemainingSig[ZigZagToN[i+1]];
+}
+
+extern char * FileNameTail(char *s)
+{
+    int l;
+    char *ans;
+
+    l = strlen(s);
+    ans = s + l;
+    while ((l>0) && ((*(ans-1)) != '/'))
+    {
+        l--;
+        ans--;
+    }
+    return(ans);
 }
 
 

@@ -1,0 +1,1399 @@
+/*********************************************************************
+  This file contains modified/added files for IJG's cjpeg, to make
+  it read and apply thresholding tables produced by rdopt. The code
+  here is not meant to be efficient or anything..!
+
+  The files affected are:
+    cjpeg.c
+    jcdctmgr.c
+
+    For both the above files, the modified lines can be found by
+    searching foe the string "thresh". There are very few of these,
+    actually (about 8 in cjpeg.c and 3 in jcdctmgr.c)
+
+  The extra files needed are
+    jcthresh.h
+    jcthresh.c
+
+  All these files are included below.
+
+**********************************************************************/
+
+/********** BEGIN cjpeg.c for THRESHOLDING ************/
+
+/*
+ * cjpeg.c
+ *
+ * Copyright (C) 1991-1995, Thomas G. Lane.
+ * This file is part of the Independent JPEG Group's software.
+ * For conditions of distribution and use, see the accompanying README file.
+ *
+ * This file contains a command-line user interface for the JPEG compressor.
+ * It should work on any system with Unix- or MS-DOS-style command lines.
+ *
+ * Two different command line styles are permitted, depending on the
+ * compile-time switch TWO_FILE_COMMANDLINE:
+ *	cjpeg [options]  inputfile outputfile
+ *	cjpeg [options]  [inputfile]
+ * In the second style, output is always to standard output, which you'd
+ * normally redirect to a file or pipe to some other program.  Input is
+ * either from a named file or from standard input (typically redirected).
+ * The second style is convenient on Unix but is unhelpful on systems that
+ * don't support pipes.  Also, you MUST use the first style if your system
+ * doesn't do binary I/O to stdin/stdout.
+ * To simplify script writing, the "-outfile" switch is provided.  The syntax
+ *	cjpeg [options]  -outfile outputfile  inputfile
+ * works regardless of which command line style is used.
+ */
+
+#include "cdjpeg.h"		/* Common decls for cjpeg/djpeg applications */
+#include "jversion.h"		/* for version message */
+
+#include "jcthresh.h"           /* Thresholding support */
+
+#ifdef USE_CCOMMAND		/* command-line reader for Macintosh */
+#ifdef __MWERKS__
+#include <SIOUX.h>              /* Metrowerks declares it here */
+#endif
+#ifdef THINK_C
+#include <console.h>		/* Think declares it here */
+#endif
+#endif
+
+
+/* Create the add-on message string table. */
+
+#define JMESSAGE(code,string)	string ,
+
+static const char * const cdjpeg_message_table[] =
+{
+#include "cderror.h"
+    NULL
+};
+
+
+/*
+ * This routine determines what format the input file is,
+ * and selects the appropriate input-reading module.
+ *
+ * To determine which family of input formats the file belongs to,
+ * we may look only at the first byte of the file, since C does not
+ * guarantee that more than one character can be pushed back with ungetc.
+ * Looking at additional bytes would require one of these approaches:
+ *     1) assume we can fseek() the input file (fails for piped input);
+ *     2) assume we can push back more than one character (works in
+ *        some C implementations, but unportable);
+ *     3) provide our own buffering (breaks input readers that want to use
+ *        stdio directly, such as the RLE library);
+ * or  4) don't put back the data, and modify the input_init methods to assume
+ *        they start reading after the start of file (also breaks RLE library).
+ * #1 is attractive for MS-DOS but is untenable on Unix.
+ *
+ * The most portable solution for file types that can't be identified by their
+ * first byte is to make the user tell us what they are.  This is also the
+ * only approach for "raw" file types that contain only arbitrary values.
+ * We presently apply this method for Targa files.  Most of the time Targa
+ * files start with 0x00, so we recognize that case.  Potentially, however,
+ * a Targa file could start with any byte value (byte 0 is the length of the
+ * seldom-used ID field), so we provide a switch to force Targa input mode.
+ */
+
+static boolean is_targa;	/* records user -targa switch */
+
+
+LOCAL cjpeg_source_ptr
+select_file_type (j_compress_ptr cinfo, FILE * infile)
+{
+    int c;
+
+    if (is_targa)
+    {
+#ifdef TARGA_SUPPORTED
+        return jinit_read_targa(cinfo);
+#else
+        ERREXIT(cinfo, JERR_TGA_NOTCOMP);
+#endif
+    }
+
+    if ((c = getc(infile)) == EOF)
+        ERREXIT(cinfo, JERR_INPUT_EMPTY);
+    if (ungetc(c, infile) == EOF)
+        ERREXIT(cinfo, JERR_UNGETC_FAILED);
+
+    switch (c)
+    {
+#ifdef BMP_SUPPORTED
+    case 'B':
+        return jinit_read_bmp(cinfo);
+#endif
+#ifdef GIF_SUPPORTED
+    case 'G':
+        return jinit_read_gif(cinfo);
+#endif
+#ifdef PPM_SUPPORTED
+    case 'P':
+        return jinit_read_ppm(cinfo);
+#endif
+#ifdef RLE_SUPPORTED
+    case 'R':
+        return jinit_read_rle(cinfo);
+#endif
+#ifdef TARGA_SUPPORTED
+    case 0x00:
+        return jinit_read_targa(cinfo);
+#endif
+    default:
+        ERREXIT(cinfo, JERR_UNKNOWN_FORMAT);
+        break;
+    }
+
+    return NULL;			/* suppress compiler warnings */
+}
+
+
+/*
+ * Argument-parsing code.
+ * The switch parser is designed to be useful with DOS-style command line
+ * syntax, ie, intermixed switches and file names, where only the switches
+ * to the left of a given file name affect processing of that file.
+ * The main program in this file doesn't actually use this capability...
+ */
+
+
+static const char * progname;	/* program name for error messages */
+static char * outfilename;	/* for -outfile switch */
+
+
+LOCAL void
+usage (void)
+/* complain about bad command line */
+{
+    fprintf(stderr, "usage: %s [switches] ", progname);
+#ifdef TWO_FILE_COMMANDLINE
+    fprintf(stderr, "inputfile outputfile\n");
+#else
+    fprintf(stderr, "[inputfile]\n");
+#endif
+
+    fprintf(stderr, "Switches (names may be abbreviated):\n");
+    fprintf(stderr, "  -quality N     Compression quality (0..100; 5-95 is useful range)\n");
+    fprintf(stderr, "  -grayscale     Create monochrome JPEG file\n");
+#ifdef ENTROPY_OPT_SUPPORTED
+    fprintf(stderr, "  -optimize      Optimize Huffman table (smaller file, but slow compression)\n");
+#endif
+#ifdef C_PROGRESSIVE_SUPPORTED
+    fprintf(stderr, "  -progressive   Create progressive JPEG file\n");
+#endif
+#ifdef TARGA_SUPPORTED
+    fprintf(stderr, "  -targa         Input file is Targa format (usually not needed)\n");
+#endif
+    fprintf(stderr, "Switches for advanced users:\n");
+#ifdef DCT_ISLOW_SUPPORTED
+    fprintf(stderr, "  -dct int       Use integer DCT method%s\n",
+            (JDCT_DEFAULT == JDCT_ISLOW ? " (default)" : ""));
+#endif
+#ifdef DCT_IFAST_SUPPORTED
+    fprintf(stderr, "  -dct fast      Use fast integer DCT (less accurate)%s\n",
+            (JDCT_DEFAULT == JDCT_IFAST ? " (default)" : ""));
+#endif
+#ifdef DCT_FLOAT_SUPPORTED
+    fprintf(stderr, "  -dct float     Use floating-point DCT method%s\n",
+            (JDCT_DEFAULT == JDCT_FLOAT ? " (default)" : ""));
+#endif
+    fprintf(stderr, "  -restart N     Set restart interval in rows, or in blocks with B\n");
+#ifdef INPUT_SMOOTHING_SUPPORTED
+    fprintf(stderr, "  -smooth N      Smooth dithered input (N=1..100 is strength)\n");
+#endif
+    fprintf(stderr, "  -maxmemory N   Maximum memory to use (in kbytes)\n");
+    fprintf(stderr, "  -outfile name  Specify name for output file\n");
+    fprintf(stderr, "  -verbose  or  -debug   Emit debug output\n");
+    fprintf(stderr, "Switches for wizards:\n");
+#ifdef C_ARITH_CODING_SUPPORTED
+    fprintf(stderr, "  -arithmetic    Use arithmetic coding\n");
+#endif
+    fprintf(stderr, "  -baseline      Force baseline output\n");
+    fprintf(stderr, "  -qtables file  Use quantization tables given in file\n");
+    fprintf(stderr, "  -thresh file   Use thresholding tables given in file\n");
+    fprintf(stderr, "  -qslots N[,...]    Set component quantization tables\n");
+    fprintf(stderr, "  -sample HxV[,...]  Set component sampling factors\n");
+#ifdef C_MULTISCAN_FILES_SUPPORTED
+    fprintf(stderr, "  -scans file    Create multi-scan JPEG per script file\n");
+#endif
+    exit(EXIT_FAILURE);
+}
+
+
+LOCAL int
+parse_switches (j_compress_ptr cinfo, int argc, char **argv,
+                int last_file_arg_seen, boolean for_real)
+/* Parse optional switches.
+ * Returns argv[] index of first file-name argument (== argc if none).
+ * Any file names with indexes <= last_file_arg_seen are ignored;
+ * they have presumably been processed in a previous iteration.
+ * (Pass 0 for last_file_arg_seen on the first or only iteration.)
+ * for_real is FALSE on the first (dummy) pass; we may skip any expensive
+ * processing.
+ */
+{
+    int argn;
+    char * arg;
+    int quality;			/* -quality parameter */
+    int q_scale_factor;		/* scaling percentage for -qtables */
+    boolean force_baseline;
+    boolean simple_progressive;
+    char * qtablefile = NULL;	/* saves -qtables filename if any */
+    char * threshfile = NULL;	/* saves -thresh filename if any */
+    char * qslotsarg = NULL;	/* saves -qslots parm if any */
+    char * samplearg = NULL;	/* saves -sample parm if any */
+    char * scansarg = NULL;	/* saves -scans parm if any */
+
+    /* Set up default JPEG parameters. */
+    /* Note that default -quality level need not, and does not,
+     * match the default scaling for an explicit -qtables argument.
+     */
+    quality = 75;			/* default -quality value */
+    q_scale_factor = 100;		/* default to no scaling for -qtables */
+    force_baseline = FALSE;	/* by default, allow 16-bit quantizers */
+    simple_progressive = FALSE;
+    is_targa = FALSE;
+    outfilename = NULL;
+    cinfo->err->trace_level = 0;
+
+    /* Scan command line options, adjust parameters */
+
+    for (argn = 1; argn < argc; argn++)
+    {
+        arg = argv[argn];
+        if (*arg != '-')
+        {
+            /* Not a switch, must be a file name argument */
+            if (argn <= last_file_arg_seen)
+            {
+                outfilename = NULL;	/* -outfile applies to just one input file */
+                continue;		/* ignore this name if previously processed */
+            }
+            break;			/* else done parsing switches */
+        }
+        arg++;			/* advance past switch marker character */
+
+        if (keymatch(arg, "arithmetic", 1))
+        {
+            /* Use arithmetic coding. */
+#ifdef C_ARITH_CODING_SUPPORTED
+            cinfo->arith_code = TRUE;
+#else
+            fprintf(stderr, "%s: sorry, arithmetic coding not supported\n",
+                    progname);
+            exit(EXIT_FAILURE);
+#endif
+
+        }
+        else if (keymatch(arg, "baseline", 1))
+        {
+            /* Force baseline output (8-bit quantizer values). */
+            force_baseline = TRUE;
+
+        }
+        else if (keymatch(arg, "dct", 2))
+        {
+            /* Select DCT algorithm. */
+            if (++argn >= argc)	/* advance to next argument */
+                usage();
+            if (keymatch(argv[argn], "int", 1))
+            {
+                cinfo->dct_method = JDCT_ISLOW;
+            }
+            else if (keymatch(argv[argn], "fast", 2))
+            {
+                cinfo->dct_method = JDCT_IFAST;
+            }
+            else if (keymatch(argv[argn], "float", 2))
+            {
+                cinfo->dct_method = JDCT_FLOAT;
+            }
+            else
+                usage();
+
+        }
+        else if (keymatch(arg, "debug", 1) || keymatch(arg, "verbose", 1))
+        {
+            /* Enable debug printouts. */
+            /* On first -d, print version identification */
+            static boolean printed_version = FALSE;
+
+            if (! printed_version)
+            {
+                fprintf(stderr, "Independent JPEG Group's CJPEG, version %s\n%s\n",
+                        JVERSION, JCOPYRIGHT);
+                printed_version = TRUE;
+            }
+            cinfo->err->trace_level++;
+
+        }
+        else if (keymatch(arg, "grayscale", 2) || keymatch(arg, "greyscale",2))
+        {
+            /* Force a monochrome JPEG file to be generated. */
+            jpeg_set_colorspace(cinfo, JCS_GRAYSCALE);
+
+        }
+        else if (keymatch(arg, "maxmemory", 3))
+        {
+            /* Maximum memory in Kb (or Mb with 'm'). */
+            long lval;
+            char ch = 'x';
+
+            if (++argn >= argc)	/* advance to next argument */
+                usage();
+            if (sscanf(argv[argn], "%ld%c", &lval, &ch) < 1)
+                usage();
+            if (ch == 'm' || ch == 'M')
+                lval *= 1000L;
+            cinfo->mem->max_memory_to_use = lval * 1000L;
+
+        }
+        else if (keymatch(arg, "optimize", 1) || keymatch(arg, "optimise", 1))
+        {
+            /* Enable entropy parm optimization. */
+#ifdef ENTROPY_OPT_SUPPORTED
+            cinfo->optimize_coding = TRUE;
+#else
+            fprintf(stderr, "%s: sorry, entropy optimization was not compiled\n",
+                    progname);
+            exit(EXIT_FAILURE);
+#endif
+
+        }
+        else if (keymatch(arg, "outfile", 4))
+        {
+            /* Set output file name. */
+            if (++argn >= argc)	/* advance to next argument */
+                usage();
+            outfilename = argv[argn];	/* save it away for later use */
+
+        }
+        else if (keymatch(arg, "progressive", 1))
+        {
+            /* Select simple progressive mode. */
+#ifdef C_PROGRESSIVE_SUPPORTED
+            simple_progressive = TRUE;
+            /* We must postpone execution until num_components is known. */
+#else
+            fprintf(stderr, "%s: sorry, progressive output was not compiled\n",
+                    progname);
+            exit(EXIT_FAILURE);
+#endif
+
+        }
+        else if (keymatch(arg, "quality", 1))
+        {
+            /* Quality factor (quantization table scaling factor). */
+            if (++argn >= argc)	/* advance to next argument */
+                usage();
+            if (sscanf(argv[argn], "%d", &quality) != 1)
+                usage();
+            /* Change scale factor in case -qtables is present. */
+            q_scale_factor = jpeg_quality_scaling(quality);
+
+        }
+        else if (keymatch(arg, "qslots", 2))
+        {
+            /* Quantization table slot numbers. */
+            if (++argn >= argc)	/* advance to next argument */
+                usage();
+            qslotsarg = argv[argn];
+            /* Must delay setting qslots until after we have processed any
+             * colorspace-determining switches, since jpeg_set_colorspace sets
+             * default quant table numbers.
+             */
+
+        }
+        else if (keymatch(arg, "qtables", 2))
+        {
+            /* Quantization tables fetched from file. */
+            if (++argn >= argc)	/* advance to next argument */
+                usage();
+            qtablefile = argv[argn];
+            /* We postpone actually reading the file in case -quality comes later. */
+
+        }
+        else if (keymatch(arg, "thresh", 3))
+        {
+            /* Thresholding tables fetched from file. */
+            if (++argn >= argc)	/* advance to next argument */
+                usage();
+            do_thresh = TRUE;
+            threshfile = argv[argn];
+
+        }
+        else if (keymatch(arg, "restart", 1))
+        {
+            /* Restart interval in MCU rows (or in MCUs with 'b'). */
+            long lval;
+            char ch = 'x';
+
+            if (++argn >= argc)	/* advance to next argument */
+                usage();
+            if (sscanf(argv[argn], "%ld%c", &lval, &ch) < 1)
+                usage();
+            if (lval < 0 || lval > 65535L)
+                usage();
+            if (ch == 'b' || ch == 'B')
+            {
+                cinfo->restart_interval = (unsigned int) lval;
+                cinfo->restart_in_rows = 0; /* else prior '-restart n' overrides me */
+            }
+            else
+            {
+                cinfo->restart_in_rows = (int) lval;
+                /* restart_interval will be computed during startup */
+            }
+
+        }
+        else if (keymatch(arg, "sample", 2))
+        {
+            /* Set sampling factors. */
+            if (++argn >= argc)	/* advance to next argument */
+                usage();
+            samplearg = argv[argn];
+            /* Must delay setting sample factors until after we have processed any
+             * colorspace-determining switches, since jpeg_set_colorspace sets
+             * default sampling factors.
+             */
+
+        }
+        else if (keymatch(arg, "scans", 2))
+        {
+            /* Set scan script. */
+#ifdef C_MULTISCAN_FILES_SUPPORTED
+            if (++argn >= argc)	/* advance to next argument */
+                usage();
+            scansarg = argv[argn];
+            /* We must postpone reading the file in case -progressive appears. */
+#else
+            fprintf(stderr, "%s: sorry, multi-scan output was not compiled\n",
+                    progname);
+            exit(EXIT_FAILURE);
+#endif
+
+        }
+        else if (keymatch(arg, "smooth", 2))
+        {
+            /* Set input smoothing factor. */
+            int val;
+
+            if (++argn >= argc)	/* advance to next argument */
+                usage();
+            if (sscanf(argv[argn], "%d", &val) != 1)
+                usage();
+            if (val < 0 || val > 100)
+                usage();
+            cinfo->smoothing_factor = val;
+
+        }
+        else if (keymatch(arg, "targa", 1))
+        {
+            /* Input file is Targa format. */
+            is_targa = TRUE;
+
+        }
+        else
+        {
+            usage();			/* bogus switch */
+        }
+    }
+
+    /* Post-switch-scanning cleanup */
+
+    if (for_real)
+    {
+
+        /* Set quantization tables for selected quality. */
+        /* Some or all may be overridden if -qtables is present. */
+        jpeg_set_quality(cinfo, quality, force_baseline);
+
+        if (qtablefile != NULL)	/* process -qtables if it was present */
+            if (! read_quant_tables(cinfo, qtablefile,
+                                    q_scale_factor, force_baseline))
+                usage();
+
+        if (qslotsarg != NULL)	/* process -qslots if it was present */
+            if (! set_quant_slots(cinfo, qslotsarg))
+                usage();
+
+        if (samplearg != NULL)	/* process -sample if it was present */
+            if (! set_sample_factors(cinfo, samplearg))
+                usage();
+
+        if (do_thresh)
+            read_thresh_tables( threshfile, cinfo->dct_method);
+
+#ifdef C_PROGRESSIVE_SUPPORTED
+        if (simple_progressive)	/* process -progressive; -scans can override */
+            jpeg_simple_progression(cinfo);
+#endif
+
+#ifdef C_MULTISCAN_FILES_SUPPORTED
+        if (scansarg != NULL)	/* process -scans if it was present */
+            if (! read_scan_script(cinfo, scansarg))
+                usage();
+#endif
+    }
+
+    return argn;			/* return index of next arg (file name) */
+}
+
+
+/*
+ * The main program.
+ */
+
+GLOBAL int
+main (int argc, char **argv)
+{
+    struct jpeg_compress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+#ifdef PROGRESS_REPORT
+    struct cdjpeg_progress_mgr progress;
+#endif
+    int file_index;
+    cjpeg_source_ptr src_mgr;
+    FILE * input_file;
+    FILE * output_file;
+    JDIMENSION num_scanlines;
+
+    /* On Mac, fetch a command line. */
+#ifdef USE_CCOMMAND
+    argc = ccommand(&argv);
+#endif
+
+    progname = argv[0];
+    if (progname == NULL || progname[0] == 0)
+        progname = "cjpeg";		/* in case C library doesn't provide it */
+
+    /* Initialize the JPEG compression object with default error handling. */
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_compress(&cinfo);
+    /* Add some application-specific error messages (from cderror.h) */
+    jerr.addon_message_table = cdjpeg_message_table;
+    jerr.first_addon_message = JMSG_FIRSTADDONCODE;
+    jerr.last_addon_message = JMSG_LASTADDONCODE;
+
+    /* Now safe to enable signal catcher. */
+#ifdef NEED_SIGNAL_CATCHER
+    enable_signal_catcher((j_common_ptr) &cinfo);
+#endif
+
+    /* Initialize JPEG parameters.
+     * Much of this may be overridden later.
+     * In particular, we don't yet know the input file's color space,
+     * but we need to provide some value for jpeg_set_defaults() to work.
+     */
+
+    cinfo.in_color_space = JCS_RGB; /* arbitrary guess */
+    jpeg_set_defaults(&cinfo);
+
+    /* Scan command line to find file names.
+     * It is convenient to use just one switch-parsing routine, but the switch
+     * values read here are ignored; we will rescan the switches after opening
+     * the input file.
+     */
+
+    file_index = parse_switches(&cinfo, argc, argv, 0, FALSE);
+
+#ifdef TWO_FILE_COMMANDLINE
+    /* Must have either -outfile switch or explicit output file name */
+    if (outfilename == NULL)
+    {
+        if (file_index != argc-2)
+        {
+            fprintf(stderr, "%s: must name one input and one output file\n",
+                    progname);
+            usage();
+        }
+        outfilename = argv[file_index+1];
+    }
+    else
+    {
+        if (file_index != argc-1)
+        {
+            fprintf(stderr, "%s: must name one input and one output file\n",
+                    progname);
+            usage();
+        }
+    }
+#else
+    /* Unix style: expect zero or one file name */
+    if (file_index < argc-1)
+    {
+        fprintf(stderr, "%s: only one input file\n", progname);
+        usage();
+    }
+#endif /* TWO_FILE_COMMANDLINE */
+
+    /* Open the input file. */
+    if (file_index < argc)
+    {
+        if ((input_file = fopen(argv[file_index], READ_BINARY)) == NULL)
+        {
+            fprintf(stderr, "%s: can't open %s\n", progname, argv[file_index]);
+            exit(EXIT_FAILURE);
+        }
+    }
+    else
+    {
+        /* default input file is stdin */
+        input_file = read_stdin();
+    }
+
+    /* Open the output file. */
+    if (outfilename != NULL)
+    {
+        if ((output_file = fopen(outfilename, WRITE_BINARY)) == NULL)
+        {
+            fprintf(stderr, "%s: can't open %s\n", progname, outfilename);
+            exit(EXIT_FAILURE);
+        }
+    }
+    else
+    {
+        /* default output file is stdout */
+        output_file = write_stdout();
+    }
+
+#ifdef PROGRESS_REPORT
+    start_progress_monitor((j_common_ptr) &cinfo, &progress);
+#endif
+
+    /* Figure out the input file format, and set up to read it. */
+    src_mgr = select_file_type(&cinfo, input_file);
+    src_mgr->input_file = input_file;
+
+    /* Read the input file header to obtain file size & colorspace. */
+    (*src_mgr->start_input) (&cinfo, src_mgr);
+
+    /* Now that we know input colorspace, fix colorspace-dependent defaults */
+    jpeg_default_colorspace(&cinfo);
+
+    /* Adjust default compression parameters by re-parsing the options */
+    file_index = parse_switches(&cinfo, argc, argv, 0, TRUE);
+
+    /* Specify data destination for compression */
+    jpeg_stdio_dest(&cinfo, output_file);
+
+    /* Start compressor */
+    jpeg_start_compress(&cinfo, TRUE);
+
+    /* Process data */
+    while (cinfo.next_scanline < cinfo.image_height)
+    {
+        num_scanlines = (*src_mgr->get_pixel_rows) (&cinfo, src_mgr);
+        (void) jpeg_write_scanlines(&cinfo, src_mgr->buffer, num_scanlines);
+    }
+
+    /* Finish compression and release memory */
+    (*src_mgr->finish_input) (&cinfo, src_mgr);
+    jpeg_finish_compress(&cinfo);
+    jpeg_destroy_compress(&cinfo);
+
+    /* Close files, if we opened them */
+    if (input_file != stdin)
+        fclose(input_file);
+    if (output_file != stdout)
+        fclose(output_file);
+
+#ifdef PROGRESS_REPORT
+    end_progress_monitor((j_common_ptr) &cinfo);
+#endif
+
+    /* All done. */
+    exit(jerr.num_warnings ? EXIT_WARNING : EXIT_SUCCESS);
+    return 0;			/* suppress no-return-value warnings */
+}
+
+
+/************ END cjpeg.c for THRESHOLDING *************************/
+
+/************ BEGIN jcdctmgr.c for THRESHOLDING ********************/
+
+/*
+ * jcdctmgr.c
+ *
+ * Copyright (C) 1994-1995, Thomas G. Lane.
+ * This file is part of the Independent JPEG Group's software.
+ * For conditions of distribution and use, see the accompanying README file.
+ *
+ * This file contains the forward-DCT management logic.
+ * This code selects a particular DCT implementation to be used,
+ * and it performs related housekeeping chores including coefficient
+ * quantization.
+ */
+
+#define JPEG_INTERNALS
+#include "jinclude.h"
+#include "jpeglib.h"
+#include "jdct.h"		/* Private declarations for DCT subsystem */
+#include "jcthresh.h"    /* Thresholding support */
+
+
+/* Private subobject for this module */
+
+typedef struct
+{
+    struct jpeg_forward_dct pub;	/* public fields */
+
+    /* Pointer to the DCT routine actually in use */
+    forward_DCT_method_ptr do_dct;
+
+    /* The actual post-DCT divisors --- not identical to the quant table
+     * entries, because of scaling (especially for an unnormalized DCT).
+     * Each table is given in normal array order; note that this must
+     * be converted from the zigzag order of the quantization tables.
+     */
+    DCTELEM * divisors[NUM_QUANT_TBLS];
+
+#ifdef DCT_FLOAT_SUPPORTED
+    /* Same as above for the floating-point case. */
+    float_DCT_method_ptr do_float_dct;
+    FAST_FLOAT * float_divisors[NUM_QUANT_TBLS];
+#endif
+} my_fdct_controller;
+
+typedef my_fdct_controller * my_fdct_ptr;
+
+
+/*
+ * Initialize for a processing pass.
+ * Verify that all referenced Q-tables are present, and set up
+ * the divisor table for each one.
+ * In the current implementation, DCT of all components is done during
+ * the first pass, even if only some components will be output in the
+ * first scan.  Hence all components should be examined here.
+ */
+
+METHODDEF void
+start_pass_fdctmgr (j_compress_ptr cinfo)
+{
+    my_fdct_ptr fdct = (my_fdct_ptr) cinfo->fdct;
+    int ci, qtblno, i;
+    jpeg_component_info *compptr;
+    JQUANT_TBL * qtbl;
+    DCTELEM * dtbl;
+
+    for (ci = 0, compptr = cinfo->comp_info; ci < cinfo->num_components;
+            ci++, compptr++)
+    {
+        qtblno = compptr->quant_tbl_no;
+        /* Make sure specified quantization table is present */
+        if (qtblno < 0 || qtblno >= NUM_QUANT_TBLS ||
+                cinfo->quant_tbl_ptrs[qtblno] == NULL)
+            ERREXIT1(cinfo, JERR_NO_QUANT_TABLE, qtblno);
+        qtbl = cinfo->quant_tbl_ptrs[qtblno];
+        /* Compute divisors for this quant table */
+        /* We may do this more than once for same table, but it's not a big deal */
+        switch (cinfo->dct_method)
+        {
+#ifdef DCT_ISLOW_SUPPORTED
+        case JDCT_ISLOW:
+            /* For LL&M IDCT method, divisors are equal to raw quantization
+             * coefficients multiplied by 8 (to counteract scaling).
+             */
+            if (fdct->divisors[qtblno] == NULL)
+            {
+                fdct->divisors[qtblno] = (DCTELEM *)
+                                         (*cinfo->mem->alloc_small) ((j_common_ptr) cinfo, JPOOL_IMAGE,
+                                                 DCTSIZE2 * SIZEOF(DCTELEM));
+            }
+            dtbl = fdct->divisors[qtblno];
+            for (i = 0; i < DCTSIZE2; i++)
+            {
+                dtbl[i] = ((DCTELEM) qtbl->quantval[jpeg_zigzag_order[i]]) << 3;
+            }
+            break;
+#endif
+#ifdef DCT_IFAST_SUPPORTED
+        case JDCT_IFAST:
+        {
+            /* For AA&N IDCT method, divisors are equal to quantization
+             * coefficients scaled by scalefactor[row]*scalefactor[col], where
+             *   scalefactor[0] = 1
+             *   scalefactor[k] = cos(k*PI/16) * sqrt(2)    for k=1..7
+             * We apply a further scale factor of 8.
+             */
+#define CONST_BITS 14
+            static const INT16 aanscales[DCTSIZE2] =
+            {
+                /* precomputed values scaled up by 14 bits: in natural order */
+                16384, 22725, 21407, 19266, 16384, 12873,  8867,  4520,
+                22725, 31521, 29692, 26722, 22725, 17855, 12299,  6270,
+                21407, 29692, 27969, 25172, 21407, 16819, 11585,  5906,
+                19266, 26722, 25172, 22654, 19266, 15137, 10426,  5315,
+                16384, 22725, 21407, 19266, 16384, 12873,  8867,  4520,
+                12873, 17855, 16819, 15137, 12873, 10114,  6967,  3552,
+                8867, 12299, 11585, 10426,  8867,  6967,  4799,  2446,
+                4520,  6270,  5906,  5315,  4520,  3552,  2446,  1247
+            };
+            SHIFT_TEMPS
+
+            if (fdct->divisors[qtblno] == NULL)
+            {
+                fdct->divisors[qtblno] = (DCTELEM *)
+                                         (*cinfo->mem->alloc_small) ((j_common_ptr) cinfo, JPOOL_IMAGE,
+                                                 DCTSIZE2 * SIZEOF(DCTELEM));
+            }
+            dtbl = fdct->divisors[qtblno];
+            for (i = 0; i < DCTSIZE2; i++)
+            {
+                dtbl[i] = (DCTELEM)
+                          DESCALE(MULTIPLY16V16((INT32) qtbl->quantval[jpeg_zigzag_order[i]],
+                                                (INT32) aanscales[i]),
+                                  CONST_BITS-3);
+            }
+        }
+        break;
+#endif
+#ifdef DCT_FLOAT_SUPPORTED
+        case JDCT_FLOAT:
+        {
+            /* For float AA&N IDCT method, divisors are equal to quantization
+             * coefficients scaled by scalefactor[row]*scalefactor[col], where
+             *   scalefactor[0] = 1
+             *   scalefactor[k] = cos(k*PI/16) * sqrt(2)    for k=1..7
+             * We apply a further scale factor of 8.
+             * What's actually stored is 1/divisor so that the inner loop can
+             * use a multiplication rather than a division.
+             */
+            FAST_FLOAT * fdtbl;
+            int row, col;
+            static const double aanscalefactor[DCTSIZE] =
+            {
+                1.0, 1.387039845, 1.306562965, 1.175875602,
+                1.0, 0.785694958, 0.541196100, 0.275899379
+            };
+
+            if (fdct->float_divisors[qtblno] == NULL)
+            {
+                fdct->float_divisors[qtblno] = (FAST_FLOAT *)
+                                               (*cinfo->mem->alloc_small) ((j_common_ptr) cinfo, JPOOL_IMAGE,
+                                                       DCTSIZE2 * SIZEOF(FAST_FLOAT));
+            }
+            fdtbl = fdct->float_divisors[qtblno];
+            i = 0;
+            for (row = 0; row < DCTSIZE; row++)
+            {
+                for (col = 0; col < DCTSIZE; col++)
+                {
+                    fdtbl[i] = (FAST_FLOAT)
+                               (1.0 / (((double) qtbl->quantval[jpeg_zigzag_order[i]] *
+                                        aanscalefactor[row] * aanscalefactor[col] * 8.0)));
+                    i++;
+                }
+            }
+        }
+        break;
+#endif
+        default:
+            ERREXIT(cinfo, JERR_NOT_COMPILED);
+            break;
+        }
+    }
+}
+
+
+/*
+ * Perform forward DCT on one or more blocks of a component.
+ *
+ * The input samples are taken from the sample_data[] array starting at
+ * position start_row/start_col, and moving to the right for any additional
+ * blocks. The quantized coefficients are returned in coef_blocks[].
+ */
+
+METHODDEF void
+forward_DCT (j_compress_ptr cinfo, jpeg_component_info * compptr,
+             JSAMPARRAY sample_data, JBLOCKROW coef_blocks,
+             JDIMENSION start_row, JDIMENSION start_col,
+             JDIMENSION num_blocks)
+/* This version is used for integer DCT implementations. */
+{
+    /* This routine is heavily used, so it's worth coding it tightly. */
+    my_fdct_ptr fdct = (my_fdct_ptr) cinfo->fdct;
+    forward_DCT_method_ptr do_dct = fdct->do_dct;
+    DCTELEM * divisors = fdct->divisors[compptr->quant_tbl_no];
+    DCTELEM workspace[DCTSIZE2];	/* work area for FDCT subroutine */
+    JDIMENSION bi;
+
+    sample_data += start_row;	/* fold in the vertical offset once */
+
+    for (bi = 0; bi < num_blocks; bi++, start_col += DCTSIZE)
+    {
+        /* Load data into workspace, applying unsigned->signed conversion */
+        {
+            register DCTELEM *workspaceptr;
+            register JSAMPROW elemptr;
+            register int elemr;
+
+            workspaceptr = workspace;
+            for (elemr = 0; elemr < DCTSIZE; elemr++)
+            {
+                elemptr = sample_data[elemr] + start_col;
+#if DCTSIZE == 8		/* unroll the inner loop */
+                *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
+                *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
+                *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
+                *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
+                *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
+                *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
+                *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
+                *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
+#else
+                {
+                    register int elemc;
+                    for (elemc = DCTSIZE; elemc > 0; elemc--)
+                    {
+                        *workspaceptr++ = GETJSAMPLE(*elemptr++) - CENTERJSAMPLE;
+                    }
+                }
+#endif
+            }
+        }
+
+        /* Perform the DCT */
+        (*do_dct) (workspace);
+
+        if (do_thresh) apply_thresholding(workspace, compptr->quant_tbl_no);
+
+        /* Quantize/descale the coefficients, and store into coef_blocks[] */
+        {
+            register DCTELEM temp, qval;
+            register int i;
+            register JCOEFPTR output_ptr = coef_blocks[bi];
+
+            for (i = 0; i < DCTSIZE2; i++)
+            {
+                qval = divisors[i];
+                temp = workspace[i];
+                /* Divide the coefficient value by qval, ensuring proper rounding.
+                 * Since C does not specify the direction of rounding for negative
+                 * quotients, we have to force the dividend positive for portability.
+                 *
+                 * In most files, at least half of the output values will be zero
+                 * (at default quantization settings, more like three-quarters...)
+                 * so we should ensure that this case is fast.  On many machines,
+                 * a comparison is enough cheaper than a divide to make a special test
+                 * a win.  Since both inputs will be nonnegative, we need only test
+                 * for a < b to discover whether a/b is 0.
+                 * If your machine's division is fast enough, define FAST_DIVIDE.
+                 */
+#ifdef FAST_DIVIDE
+#define DIVIDE_BY(a,b)	a /= b
+#else
+#define DIVIDE_BY(a,b)	if (a >= b) a /= b; else a = 0
+#endif
+                if (temp < 0)
+                {
+                    temp = -temp;
+                    temp += qval>>1;	/* for rounding */
+                    DIVIDE_BY(temp, qval);
+                    temp = -temp;
+                }
+                else
+                {
+                    temp += qval>>1;	/* for rounding */
+                    DIVIDE_BY(temp, qval);
+                }
+                output_ptr[i] = (JCOEF) temp;
+            }
+        }
+    }
+}
+
+
+#ifdef DCT_FLOAT_SUPPORTED
+
+METHODDEF void
+forward_DCT_float (j_compress_ptr cinfo, jpeg_component_info * compptr,
+                   JSAMPARRAY sample_data, JBLOCKROW coef_blocks,
+                   JDIMENSION start_row, JDIMENSION start_col,
+                   JDIMENSION num_blocks)
+/* This version is used for floating-point DCT implementations. */
+{
+    /* This routine is heavily used, so it's worth coding it tightly. */
+    my_fdct_ptr fdct = (my_fdct_ptr) cinfo->fdct;
+    float_DCT_method_ptr do_dct = fdct->do_float_dct;
+    FAST_FLOAT * divisors = fdct->float_divisors[compptr->quant_tbl_no];
+    FAST_FLOAT workspace[DCTSIZE2]; /* work area for FDCT subroutine */
+    JDIMENSION bi;
+
+    sample_data += start_row;	/* fold in the vertical offset once */
+
+    for (bi = 0; bi < num_blocks; bi++, start_col += DCTSIZE)
+    {
+        /* Load data into workspace, applying unsigned->signed conversion */
+        {
+            register FAST_FLOAT *workspaceptr;
+            register JSAMPROW elemptr;
+            register int elemr;
+
+            workspaceptr = workspace;
+            for (elemr = 0; elemr < DCTSIZE; elemr++)
+            {
+                elemptr = sample_data[elemr] + start_col;
+#if DCTSIZE == 8		/* unroll the inner loop */
+                *workspaceptr++ = (FAST_FLOAT)(GETJSAMPLE(*elemptr++) - CENTERJSAMPLE);
+                *workspaceptr++ = (FAST_FLOAT)(GETJSAMPLE(*elemptr++) - CENTERJSAMPLE);
+                *workspaceptr++ = (FAST_FLOAT)(GETJSAMPLE(*elemptr++) - CENTERJSAMPLE);
+                *workspaceptr++ = (FAST_FLOAT)(GETJSAMPLE(*elemptr++) - CENTERJSAMPLE);
+                *workspaceptr++ = (FAST_FLOAT)(GETJSAMPLE(*elemptr++) - CENTERJSAMPLE);
+                *workspaceptr++ = (FAST_FLOAT)(GETJSAMPLE(*elemptr++) - CENTERJSAMPLE);
+                *workspaceptr++ = (FAST_FLOAT)(GETJSAMPLE(*elemptr++) - CENTERJSAMPLE);
+                *workspaceptr++ = (FAST_FLOAT)(GETJSAMPLE(*elemptr++) - CENTERJSAMPLE);
+#else
+                {
+                    register int elemc;
+                    for (elemc = DCTSIZE; elemc > 0; elemc--)
+                    {
+                        *workspaceptr++ = (FAST_FLOAT)
+                                          (GETJSAMPLE(*elemptr++) - CENTERJSAMPLE);
+                    }
+                }
+#endif
+            }
+        }
+
+        /* Perform the DCT */
+        (*do_dct) (workspace);
+
+        if (do_thresh) apply_float_thresholding(workspace, compptr->quant_tbl_no);
+
+        /* Quantize/descale the coefficients, and store into coef_blocks[] */
+        {
+            register FAST_FLOAT temp;
+            register int i;
+            register JCOEFPTR output_ptr = coef_blocks[bi];
+
+            for (i = 0; i < DCTSIZE2; i++)
+            {
+                /* Apply the quantization and scaling factor */
+                temp = workspace[i] * divisors[i];
+                /* Round to nearest integer.
+                 * Since C does not specify the direction of rounding for negative
+                 * quotients, we have to force the dividend positive for portability.
+                 * The maximum coefficient size is +-16K (for 12-bit data), so this
+                 * code should work for either 16-bit or 32-bit ints.
+                 */
+                output_ptr[i] = (JCOEF) ((int) (temp + (FAST_FLOAT) 16384.5) - 16384);
+            }
+        }
+    }
+}
+
+#endif /* DCT_FLOAT_SUPPORTED */
+
+
+/*
+ * Initialize FDCT manager.
+ */
+
+GLOBAL void
+jinit_forward_dct (j_compress_ptr cinfo)
+{
+    my_fdct_ptr fdct;
+    int i;
+
+    fdct = (my_fdct_ptr)
+           (*cinfo->mem->alloc_small) ((j_common_ptr) cinfo, JPOOL_IMAGE,
+                                       SIZEOF(my_fdct_controller));
+    cinfo->fdct = (struct jpeg_forward_dct *) fdct;
+    fdct->pub.start_pass = start_pass_fdctmgr;
+
+    switch (cinfo->dct_method)
+    {
+#ifdef DCT_ISLOW_SUPPORTED
+    case JDCT_ISLOW:
+        fdct->pub.forward_DCT = forward_DCT;
+        fdct->do_dct = jpeg_fdct_islow;
+        break;
+#endif
+#ifdef DCT_IFAST_SUPPORTED
+    case JDCT_IFAST:
+        fdct->pub.forward_DCT = forward_DCT;
+        fdct->do_dct = jpeg_fdct_ifast;
+        break;
+#endif
+#ifdef DCT_FLOAT_SUPPORTED
+    case JDCT_FLOAT:
+        fdct->pub.forward_DCT = forward_DCT_float;
+        fdct->do_float_dct = jpeg_fdct_float;
+        break;
+#endif
+    default:
+        ERREXIT(cinfo, JERR_NOT_COMPILED);
+        break;
+    }
+
+    /* Mark divisor tables unallocated */
+    for (i = 0; i < NUM_QUANT_TBLS; i++)
+    {
+        fdct->divisors[i] = NULL;
+#ifdef DCT_FLOAT_SUPPORTED
+        fdct->float_divisors[i] = NULL;
+#endif
+    }
+}
+
+
+/******************* END jcdctmgr.c for THRESHOLDING ************/
+
+/******************* BEGIN jcthresh.h ***************************/
+
+#ifndef JCTHRESH_INCLUDED
+#define JCTHRESH_INCLUDED
+
+#include "jdct.h"
+
+extern boolean do_thresh;
+
+extern void
+read_thresh_tables (char *threshfile, J_DCT_METHOD dct_method);
+
+extern void
+apply_thresholding (DCTELEM *workspace, int comp_num);
+
+
+#ifdef DCT_FLOAT_SUPPORTED
+
+extern void
+apply_float_thresholding (FAST_FLOAT *workspace, int comp_num);
+
+#endif /* DCT_FLOAT_SUPPORTED */
+
+#endif /* JCTHRESH_INCLUDED */
+
+/********************** END jcthresh.h **************************/
+
+/********************** BEGIN jcthresh.c ************************/
+
+#include "cdjpeg.h"
+
+
+#include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+#include "jcthresh.h"
+
+/************************************
+  Read the next line from fd into s[]
+  Replace '\n' with '\0'
+  Read at most limit characters
+  Return number of characters read or EOF
+*************************************/
+
+LOCAL int
+newline(char s[], int fd, int limit)
+{
+    int i;
+    char c;
+    i = 0;
+    while (read(fd,&c,1) == 1)
+    {
+        if (c == '\n')
+        {
+            s[i] = '\0';
+            return (i+1);
+        }
+        s[i] = c;
+        i++;
+        if (i == (limit-1))
+        {
+            s[i] = '\0';
+            return (limit);
+        }
+    }
+    if (i > 0)
+    {
+        s[i] = '\0';
+        return (i+1);
+    }
+    else
+    {
+        return EOF;
+    }
+}
+
+/*************************************************************
+  Read one table of 64 thresholds from fd into tab
+  The lines in the file that contain the threshold table
+  begin with "#T "
+  Since DCT calculations will do scaling, apply the
+  same scaling (depending on dct_method) to the thresholds.
+  Return TRUE iff whole table could be read
+************************************************************/
+
+LOCAL boolean
+read_float_table(int fd, float *tab, J_DCT_METHOD dct_method)
+{
+    int i,j,n;
+    char nextline[100], *nextplace;
+    float ftemp;
+    static const float aanscalefactor[8] =
+    {
+        1.0, 1.387039845, 1.306562965, 1.175875602,
+        1.0, 0.785694958, 0.541196100, 0.275899379
+    };
+
+
+    n = 0;
+
+    while ((n < 64) && (newline(nextline,fd, 100) != EOF))
+    {
+        if ((nextline[0] != '#') ||
+                (nextline[1] != 'T') ||
+                (nextline[2] != ' ')) continue;
+        nextplace = nextline + 3;
+        while ((nextplace) && (n < 64))
+        {
+            while ((*nextplace == ' ') || (*nextplace == '\t')) nextplace++;
+            if (sscanf(nextplace,"%f",&ftemp) != 1) break;
+            tab[n++] = ftemp;
+            nextplace = strpbrk(nextplace," \t");
+        }
+    }
+
+    if (n != 64) return (FALSE);
+
+    switch (dct_method)
+    {
+#ifdef DCT_ISLOW_SUPPORTED
+    case JDCT_ISLOW:
+        n=0;
+        for (i=0; i<8; i++)
+        {
+            for (j=0; j<8; j++)
+            {
+                tab[n++] *= 8.0;
+            }
+        }
+        break;
+#endif
+#ifdef DCT_IFAST_SUPPORTED
+    case JDCT_IFAST:
+        n=0;
+        for (i=0; i<8; i++)
+        {
+            for (j=0; j<8; j++)
+            {
+                tab[n++] *= (aanscalefactor[i]*aanscalefactor[j]*8.0);
+            }
+        }
+        break;
+#endif
+#ifdef DCT_FLOAT_SUPPORTED
+    case JDCT_FLOAT:
+        n=0;
+        for (i=0; i<8; i++)
+        {
+            for (j=0; j<8; j++)
+            {
+                tab[n++] *= (aanscalefactor[i]*aanscalefactor[j]*8.0);
+            }
+        }
+        break;
+#endif
+    default:
+        return (FALSE);
+    }
+
+
+    return (TRUE);
+}
+
+
+boolean do_thresh = FALSE;
+float thresh_table[NUM_QUANT_TBLS][DCTSIZE2];
+int num_thresh_tables = 0;
+
+/**************************************************************
+  Read all thresholding tables from filr named threshfile
+***************************************************************/
+
+GLOBAL void
+read_thresh_tables (char *threshfile, J_DCT_METHOD dct_method)
+{
+    int fd;
+
+    if ((fd = open(threshfile, O_RDONLY)) < 0) return;
+
+    while (read_float_table(fd, thresh_table[num_thresh_tables], dct_method))
+    {
+        num_thresh_tables++;
+        if (num_thresh_tables >= NUM_QUANT_TBLS) break;
+    }
+
+    close(fd);
+}
+
+/**********************************************************
+  Apply thresholding to scaled DCT coefs in workspace
+***********************************************************/
+
+GLOBAL void
+apply_thresholding (DCTELEM *workspace, int comp_num)
+{
+    int i, tnum;
+    float val, temp;
+
+    if (num_thresh_tables <= 0) return;
+
+    if ((tnum = comp_num) >= num_thresh_tables)
+        tnum = num_thresh_tables - 1;
+
+
+    for (i=0; i<64; i++)
+    {
+        val = (float) workspace[i];
+        if ((temp = ((float) 0.0) - val) > ((float) 0.0)) val = temp;
+        if (val < thresh_table[tnum][i]) workspace[i] = (DCTELEM) 0;
+    }
+
+
+
+}
+
+
+#ifdef DCT_FLOAT_SUPPORTED
+
+/**********************************************************
+  Apply thresholding to scaled float DCT coefs in workspace
+***********************************************************/
+
+GLOBAL void
+apply_float_thresholding (FAST_FLOAT *workspace, int comp_num)
+{
+    int i, tnum;
+    float val, temp;
+
+    if (num_thresh_tables <= 0) return;
+
+    if ((tnum = comp_num) >= num_thresh_tables)
+        tnum = num_thresh_tables - 1;
+
+
+    for (i=0; i<64; i++)
+    {
+        val = (float) workspace[i];
+        if ((temp = ((float) 0.0) - val) > ((float) 0.0)) val = temp;
+        if (val < thresh_table[tnum][i]) workspace[i] = (FAST_FLOAT) 0;
+    }
+
+
+
+
+}
+
+#endif
+
+/***************************** END jcthresh.c *********************/
+
+

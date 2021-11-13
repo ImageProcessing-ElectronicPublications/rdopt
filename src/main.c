@@ -1,5 +1,6 @@
+
 /*
-** Copyright 1995 by Viresh Ratnakar, Miron Livny
+** Copyright 1995,1996 by Viresh Ratnakar, Miron Livny
 **
 ** Permission to use and copy this software and its documentation
 ** for any non-commercial purpose and without fee is hereby granted,
@@ -29,13 +30,20 @@
 
 #include "rdopt.h"
 
+
+
 OptimJob TheJob;
+
+FILE *errfile; /* global stderr */
 
 int main(int argc, char *argv[])
 {
     int UnitNum, EndCompNum, n, i;
     FILE *hfile;
     char DesString[STRLENMAX];
+    FFLOAT Stemp[64];
+
+    errfile = stderr;
 
     InitOptimJob(&TheJob);
 
@@ -50,8 +58,9 @@ int main(int argc, char *argv[])
                      UnitNum;
         if (TheJob.VerboseLevel)
         {
-            fprintf(stderr,"Unit %d: color planes %d through %d\n",
+            fprintf(errfile,"Unit %d: color planes %d through %d\n",
                     UnitNum,UnitNum,EndCompNum);
+            fflush(errfile);
         }
 
         /************** get stats in TheJob.Histogram ***********/
@@ -59,8 +68,9 @@ int main(int argc, char *argv[])
         {
             if (TheJob.VerboseLevel)
             {
-                fprintf(stderr,"\tReading statistics from the file %s\n",
+                fprintf(errfile,"\tReading statistics from the file %s\n",
                         TheJob.HistFile);
+                fflush(errfile);
             }
             if (UnitNum==0)
             {
@@ -73,6 +83,14 @@ int main(int argc, char *argv[])
             ReadHistogram(hfile,TheJob.Histogram,
                           &TheJob.LogSignalSq[UnitNum]);
             TheJob.LogSignalSq[UnitNum] *= TheJob.NumPixels[UnitNum];
+            SetSignal(TheJob.Histogram,Stemp);
+            if (TheJob.WeightedCoefs[UnitNum])
+            {
+                for (i=0; i<64; i++)
+                    Stemp[i] *= TheJob.CoefWeights[UnitNum][i];
+            }
+            SigToRemainingSig(Stemp, TheJob.RemainingSignal[UnitNum]);
+
             if (UnitNum == (TheJob.NumTables-1)) fclose(hfile);
 
             if (NotEqualReal(TheJob.NumBlocks[UnitNum],
@@ -85,21 +103,31 @@ int main(int argc, char *argv[])
         {
             InitHistogram(TheJob.Histogram);
             TheJob.LogSignalSq[UnitNum] = 0.0;
+            for (i=0; i<64; i++) Stemp[i] = ((FFLOAT) 0.0);
             for (i=UnitNum; i<=EndCompNum; i++)
             {
                 if (TheJob.VerboseLevel)
                 {
-                    fprintf(stderr,"\tReading image color plane #%d\n",i);
+                    fprintf(errfile,"\tReading image color plane #%d\n",i);
+                    fflush(errfile);
                 }
-                ReadImgComp(&TheJob.TheImage, i);
+                if (!ReadImgComp(&TheJob.TheImage, i))
+                    FatalError("Could not read image plane");
                 if (TheJob.VerboseLevel)
                 {
-                    fprintf(stderr,"\tComputing statistics for image color plane #%d\n",i);
+                    fprintf(errfile,"\tComputing statistics for image color plane #%d\n",i);
+                    fflush(errfile);
                 }
                 SetHistogram(TheJob.Histogram,&TheJob.TheImage,i,
-                             &TheJob.LogSignalSq[UnitNum]);
+                             &TheJob.LogSignalSq[UnitNum], Stemp, TheJob.UseDCDPCM);
                 FreeImgComp(&TheJob.TheImage,i);
             }
+            if (TheJob.WeightedCoefs[UnitNum])
+            {
+                for (i=0; i<64; i++)
+                    Stemp[i] *= TheJob.CoefWeights[UnitNum][i];
+            }
+            SigToRemainingSig(Stemp, TheJob.RemainingSignal[UnitNum]);
         }
 
         for (n=0; n<64; n++)
@@ -122,7 +150,8 @@ int main(int argc, char *argv[])
             WriteDescription(DesString, &TheJob.TheImage,UnitNum,EndCompNum);
             if (TheJob.VerboseLevel)
             {
-                fprintf(stderr,"\tDumping statistics\n");
+                fprintf(errfile,"\tDumping statistics\n");
+                fflush(errfile);
             }
             DumpHistogram(hfile,TheJob.Histogram,DesString,
                           TheJob.LogSignalSq[UnitNum]/TheJob.NumPixels[UnitNum]);
@@ -135,64 +164,89 @@ int main(int argc, char *argv[])
         }
 
 
-        if (TheJob.BppRangeExists[UnitNum])
-        {
-            if (TheJob.VerboseLevel)
-            {
-                fprintf(stderr,"\tTranslating Bpp-ranges to min-max entries\n");
-            }
-            TranslateBppRange(&TheJob,UnitNum);
-        }
 
         /*********** fill ERR and BPP **********************/
-        PrepareForErrBpp(&TheJob,UnitNum);
 
-        if (TheJob.VerboseLevel)
+        if (!TheJob.UseLagrangian)
         {
-            fprintf(stderr,"\tFilling errors\n");
-        }
-        SetErr(&TheJob,UnitNum);
+            PrepareForErrBpp(&TheJob,UnitNum);
 
-        if (TheJob.VerboseLevel)
+            if (TheJob.VerboseLevel)
+            {
+                fprintf(errfile,"\tFilling errors and entropies\n");
+                fflush(errfile);
+            }
+            SetErrBpp(&TheJob,UnitNum);
+
+
+            FreeHistogram(TheJob.Histogram);
+
+            if (TheJob.VerboseLevel)
+            {
+                fprintf(errfile,"\tRunning optimization algorithm\n");
+                fflush(errfile);
+            }
+
+
+            Optimize(&TheJob,UnitNum);
+        }
+        else
         {
-            fprintf(stderr,"\tFilling entropies\n");
+
+            lagrPrepareForErrBpp(&TheJob,UnitNum);
+
+            if (TheJob.VerboseLevel)
+            {
+                fprintf(errfile,"\tFilling errors and entropies\n");
+                fflush(errfile);
+            }
+            lagrSetErrBpp(&TheJob,UnitNum);
+
+
+            FreeHistogram(TheJob.Histogram);
+
+            if (TheJob.VerboseLevel)
+            {
+                fprintf(errfile,"\tSorting R-D tables\n");
+                fflush(errfile);
+            }
+
+            lagrSortErrBpp(&TheJob,UnitNum);
+
         }
-        SetBpp(&TheJob,UnitNum);
-
-        FreeHistogram(TheJob.Histogram);
-
-        if (TheJob.VerboseLevel)
-        {
-            fprintf(stderr,"\tRunning optimization algorithm\n");
-        }
-
-
-        Optimize(&TheJob,UnitNum);
-
-        free(TheJob.Err[0]);
 
     }
 
     if (TheJob.OnlyDumpStats) exit(0);
 
-    /*********************** combine units *****************/
-    if (TheJob.NumTables > 1)
+    if (!TheJob.UseLagrangian)
     {
-
-        if (TheJob.VerboseLevel)
+        /*********************** combine units *****************/
+        if (TheJob.NumTables > 1)
         {
-            fprintf(stderr,"Combining information from all units\n");
+
+            if (TheJob.VerboseLevel)
+            {
+                fprintf(errfile,"Combining information from all units\n");
+                fflush(errfile);
+            }
+
+            CombineUnits(&TheJob);
         }
 
-        CombineUnits(&TheJob);
+        Epilogue(&TheJob);
+        /****************** command interpreter ******************/
+        Command(&TheJob);
+    }
+    else
+    {
+        lagrEpilogue(&TheJob);
+        /****************** command interpreter ******************/
+        lagrCommand(&TheJob);
     }
 
-    Epilogue(&TheJob);
 
-    /****************** command interpreter ******************/
-
-    Command(&TheJob);
-
+    if (((int) errfile != (int) stderr) && ((int) errfile != (int) stdout)) fclose(errfile);
 
     return(0);
 }

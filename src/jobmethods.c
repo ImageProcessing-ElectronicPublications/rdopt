@@ -1,5 +1,6 @@
+
 /*
-** Copyright 1995 by Viresh Ratnakar, Miron Livny
+** Copyright 1995,1996 by Viresh Ratnakar, Miron Livny
 **
 ** Permission to use and copy this software and its documentation
 ** for any non-commercial purpose and without fee is hereby granted,
@@ -36,10 +37,10 @@ extern void InitOptimJob(OptimJob *job)
     int n,i;
     InitImage(&job->TheImage);
     job->NumTables = 1;
-    job->BppMax = 1.0;
-    job->BppScale = 5000;
+    job->opt_method.dp.BppMax = 1.0;
+    job->opt_method.dp.BppScale = 5000;
+    job->ThreshSpan = 0;
     job->MapQ = FALSE;
-    job->WeightedCoefs = FALSE;
     job->VerboseLevel = 0;
     job->HistFilePresent = FALSE;
     job->ImFilePresent = FALSE;
@@ -47,12 +48,20 @@ extern void InitOptimJob(OptimJob *job)
     job->OnlyDumpStats = FALSE;
     job->ReadCmdFromFile = FALSE;
     job->Silent = FALSE;
+    job->DumpPlot = FALSE;
+    job->PlotPoints = PLOT_POINTS;
+    job->PlotBppMax = ((FFLOAT) 1.0);
+    job->WeightedComps = FALSE;
+    job->UseLagrangian = FALSE;
+    job->useCorrection = FALSE;
+    job->UseDCDPCM = FALSE;
 
+    job->bppplane = -1;
 
-    job->DCclamp = 12;
+    job->DCclamp = QTABENTRYMAX;
     for (i=0; i<MAXCOMPONENTS; i++)
     {
-        job->BppRangeExists[i] = FALSE;
+        job->WeightedCoefs[i] = FALSE;
         for (n=0; n<64; n++)
         {
             job->MinTable[i][n] = 1;
@@ -60,7 +69,6 @@ extern void InitOptimJob(OptimJob *job)
         }
     }
 
-    job->DumpPlot = FALSE;
 }
 
 
@@ -69,34 +77,49 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
     int i,j,n;
     int h,v;
     FFLOAT ftemp;
+    double dtemp;
     FILE *fp;
     double b1,b2;
+    char *tempstr;
 
     i=1;
 
     while (i<argc)
     {
 
-        if (!strncmp(argv[i],"-stats",6))
+        if (!strncmp(argv[i],"-stats",3))
         {
             job->DumpStats = TRUE;
         }
-        else if (!strncmp(argv[i],"-mapq",5))
+        else if (!strncmp(argv[i],"-mapq",4))
         {
             job->MapQ = TRUE;
         }
-        else if (!strncmp(argv[i],"-silent",7))
+        else if (!strncmp(argv[i],"-dcdpcm",3))
+        {
+            job->UseDCDPCM = TRUE;
+        }
+        else if (!strncmp(argv[i],"-bppplane",5))
+        {
+            i++;
+            if (i >= argc) BriefUsage();
+            if ((job->bppplane = atoi(argv[i])) < 0)
+            {
+                job->bppplane = -1;
+            }
+        }
+        else if (!strncmp(argv[i],"-silent",4))
         {
             job->Silent = TRUE;
             job->VerboseLevel = 0;
             job->TheImage.Silent = TRUE;
         }
-        else if (!strncmp(argv[i],"-onlystats",10))
+        else if (!strncmp(argv[i],"-onlystats",6))
         {
             job->DumpStats = TRUE;
             job->OnlyDumpStats = TRUE;
         }
-        else if (!strncmp(argv[i],"-height",7))
+        else if (!strncmp(argv[i],"-height",4))
         {
             i++;
             if (i >= argc) BriefUsage();
@@ -105,7 +128,7 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
                 FatalError("Image height must be > 0!");
             }
         }
-        else if (!strncmp(argv[i],"-width",6))
+        else if (!strncmp(argv[i],"-width",3))
         {
             i++;
             if (i >= argc) BriefUsage();
@@ -114,7 +137,7 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
                 FatalError("Image width must be > 0!");
             }
         }
-        else if (!strncmp(argv[i],"-planes",6))
+        else if (!strncmp(argv[i],"-planes",4))
         {
             i++;
             if (i >= argc) BriefUsage();
@@ -127,7 +150,7 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
                 FatalError("Number of color planes too high");
             }
         }
-        else if (!strncmp(argv[i],"-subsamp",8))
+        else if (!strncmp(argv[i],"-subsamp",4))
         {
             if ((i+3) >= argc) BriefUsage();
             i++;
@@ -145,7 +168,7 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
                 FatalError("Sampling factors must be > 0!");
             }
         }
-        else if (!strncmp(argv[i],"-insubsamp",10))
+        else if (!strncmp(argv[i],"-insubsamp",4))
         {
             if ((i+3) >= argc) BriefUsage();
             i++;
@@ -167,7 +190,14 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
         {
             job->VerboseLevel++;
         }
-        else if (!strncmp(argv[i],"-numtables",10))
+        else if (!strncmp(argv[i],"-method",4))
+        {
+            i++;
+            if (i>=argc) BriefUsage();
+            if (!strncmp(argv[i],"lagrangian",4)) job->UseLagrangian = TRUE;
+            else job->UseLagrangian = FALSE;
+        }
+        else if (!strncmp(argv[i],"-numtables",5))
         {
             i++;
             if (i>=argc) BriefUsage();
@@ -177,38 +207,18 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
                 FatalError("Bad value in -numtables");
             }
         }
-        else if (!strncmp(argv[i],"-clampDC",8))
+        else if (!strncmp(argv[i],"-clampDC",5))
         {
             i++;
             if (i>=argc) BriefUsage();
             if ((job->DCclamp = atoi(argv[i])) < 0)
                 FatalError("Bad value in -clampDC");
         }
-        else if (!strncmp(argv[i],"-dontclampDC",12))
+        else if (!strncmp(argv[i],"-dontclampDC",6))
         {
             job->DCclamp = QTABENTRYMAX;
         }
-        else if (!strncmp(argv[i],"-bppdist",8))
-        {
-            if ((i+2) >= argc) BriefUsage();
-            i++;
-            n = atoi(argv[i]);
-            if ((n >= MAXCOMPONENTS) || (n < 0))
-                FatalError("Bad unit number in -bppdist");
-            i++;
-            if ((fp = fopen(argv[i],"r")) == NULL)
-                FatalError("Could not open file for -bppdist");
-            for (j=0; j<64; j++)
-            {
-                if (fscanf(fp,"%lf:%lf",&b1,&b2) != 2)
-                    FatalError("Bad format in file for -bppdist");
-                job->BppRange[n][j][0] = b1;
-                job->BppRange[n][j][1] = b2;
-            }
-            fclose(fp);
-            job->BppRangeExists[n] = TRUE;
-        }
-        else if (!strncmp(argv[i],"-mintable",9))
+        else if (!strncmp(argv[i],"-mintable",5))
         {
             if ((i+2) >= argc) BriefUsage();
             i++;
@@ -216,12 +226,13 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
             if ((n >= MAXCOMPONENTS) || (n < 0))
                 FatalError("Bad unit number in -mintable");
             i++;
-            if ((fp = fopen(argv[i],"r")) == NULL)
+            if (!strcmp(argv[i],"-")) fp = stdin;
+            else if ((fp = fopen(argv[i],"r")) == NULL)
                 FatalError("Could not open file for -mintable");
             ReadIntTable(fp,job->MinTable[n]);
-            fclose(fp);
+            if (strcmp(argv[i],"-")) fclose(fp);
         }
-        else if (!strncmp(argv[i],"-maxtable",9))
+        else if (!strncmp(argv[i],"-maxtable",5))
         {
             if ((i+2) >= argc) BriefUsage();
             i++;
@@ -229,54 +240,135 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
             if ((n >= MAXCOMPONENTS) || (n < 0))
                 FatalError("Bad unit number in -maxtable");
             i++;
-            if ((fp = fopen(argv[i],"r")) == NULL)
+            if (!strcmp(argv[i],"-")) fp = stdin;
+            else if ((fp = fopen(argv[i],"r")) == NULL)
                 FatalError("Could not open file for -maxtable");
             ReadIntTable(fp,job->MaxTable[n]);
-            fclose(fp);
+            if (strcmp(argv[i],"-")) fclose(fp);
         }
-        else if (!strncmp(argv[i],"-bppmax",7))
+        else if (!strncmp(argv[i],"-bppmax",5))
         {
             i++;
             if (i >= argc) BriefUsage();
-            job->BppMax = ((FFLOAT) atof(argv[i]));
-            if (job->BppMax <= 0.0)
+            job->opt_method.dp.BppMax = ((FFLOAT) atof(argv[i]));
+            if (job->opt_method.dp.BppMax <= 0.0)
                 FatalError("Bad value in -bppmax");
         }
-        else if (!strncmp(argv[i],"-bppscale",9))
+        else if (!strncmp(argv[i],"-pbppmax",5))
         {
             i++;
             if (i >= argc) BriefUsage();
-            job->BppScale = atoi(argv[i]);
-            if (job->BppScale <= 0)
+            job->PlotBppMax = ((FFLOAT) atof(argv[i]));
+            if (job->PlotBppMax <= 0.0)
+                job->PlotBppMax = ((FFLOAT) 1.0);
+        }
+        else if (!strncmp(argv[i],"-correct",4))
+        {
+            i++;
+            if (i >= argc) BriefUsage();
+            job->correctionBpp = ((FFLOAT) atof(argv[i]));
+            job->useCorrection = TRUE;
+            if (job->correctionBpp <= 0.0)
+                FatalError("Bad value in -correct");
+        }
+        else if (!strncmp(argv[i],"-bppscale",5))
+        {
+            i++;
+            if (i >= argc) BriefUsage();
+            job->opt_method.dp.BppScale = atoi(argv[i]);
+            if (job->opt_method.dp.BppScale <= 1)
                 FatalError("Bad value in -bppscale");
         }
-        else if (!strncmp(argv[i],"-weights",8))
+        else if (!strncmp(argv[i],"-thresh",3))
         {
             i++;
             if (i >= argc) BriefUsage();
-            if ((fp = fopen(argv[i],"r")) == NULL)
+            job->ThreshSpan = atoi(argv[i]);
+            if (job->ThreshSpan < 0)
+                FatalError("Bad value in -thresh");
+            if (job->ThreshSpan > QTABENTRYMAX)
+                FatalError("Bad value (too high) in -thresh");
+        }
+        else if (!strncmp(argv[i],"-weights",4))
+        {
+            if ((i+2) >= argc) BriefUsage();
+            i++;
+            n = atoi(argv[i]);
+            if ((n >= MAXCOMPONENTS) || (n < 0))
+                FatalError("Bad unit number in -weights");
+            i++;
+            if (!strcmp(argv[i],"-")) fp = stdin;
+            else if ((fp = fopen(argv[i],"r")) == NULL)
                 FatalError("Could not open file for -weights");
-            ReadRealTable(fp,job->CoefWeights);
-            fclose(fp);
-            job->WeightedCoefs = TRUE;
+            ReadRealTable(fp,job->CoefWeights[n]);
+            if (strcmp(argv[i],"-")) fclose(fp);
+            job->WeightedCoefs[n] = TRUE;
             /*** normalize weights ***/
             ftemp = 0.0;
-            for (j=0; j<64; j++) ftemp += job->CoefWeights[j];
+            for (j=0; j<64; j++) ftemp += job->CoefWeights[n][j];
+            ftemp /= 64.0;
             if (ftemp <= 0.0) FatalError("Bad weights in -weights");
-            for (j=0; j<64; j++) job->CoefWeights[j] /= ftemp;
+            for (j=0; j<64; j++) job->CoefWeights[n][j] /= ftemp;
         }
-        else if (!strncmp(argv[i],"-plot",5))
+        else if (!strncmp(argv[i],"-pweights",3))
+        {
+            i++;
+            if (i >= argc) BriefUsage();
+            job->WeightedComps = TRUE;
+            tempstr = argv[i];
+            sscanf(tempstr,"%lf",&dtemp);
+            if (dtemp <= 0.0) FatalError("Bad weights in -pweights");
+            job->CompWeights[0] = ((FFLOAT) dtemp);
+            tempstr = strchr(tempstr,',');
+            n = 1;
+            while ((tempstr) && (n < MAXCOMPONENTS))
+            {
+                tempstr++;
+                sscanf(tempstr,"%lf",&dtemp);
+                if (dtemp <= 0.0) FatalError("Bad weights in -pweights");
+                job->CompWeights[n] = ((FFLOAT) dtemp);
+                n++;
+                tempstr = strchr(tempstr,',');
+            }
+            while (n < MAXCOMPONENTS)
+            {
+                job->CompWeights[n] = ((FFLOAT) dtemp);
+                n++;
+            }
+        }
+        else if (!strncmp(argv[i],"-plot",3))
         {
             i++;
             if (i >= argc) BriefUsage();
             strcpy(job->PlotFileName,argv[i]);
             job->DumpPlot = TRUE;
         }
-        else if (!strncmp(argv[i],"-help",5))
+        else if (!strncmp(argv[i],"-points",3))
+        {
+            i++;
+            if (i >= argc) BriefUsage();
+            if ((job->PlotPoints = atoi(argv[i])) < 2)
+                job->PlotPoints = PLOT_POINTS;
+        }
+        else if (!strncmp(argv[i],"-errfile",5))
+        {
+            i++;
+            if (i >= argc) BriefUsage();
+            if (!strcmp(argv[i],"-")) errfile = stdout;
+            else
+            {
+                if ((errfile = fopen(argv[i],"w")) == NULL)
+                {
+                    errfile = stderr;
+                }
+            }
+            job->TheImage.errfile = errfile;
+        }
+        else if (!strncmp(argv[i],"-help",4))
         {
             Usage();
         }
-        else if (!strncmp(argv[i],"-cmdfile",8))
+        else if (!strncmp(argv[i],"-cmdfile",4))
         {
             i++;
             if (i >= argc) BriefUsage();
@@ -313,12 +405,12 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
 
     if (job->HistFilePresent && job->ImFilePresent)
     {
-        fprintf(stderr,"Cannot give both a histogram and an image as input!\n");
+        fprintf(errfile,"Cannot give both a histogram and an image as input!\n");
         exit(1);
     }
     if (!job->HistFilePresent && !job->ImFilePresent)
     {
-        fprintf(stderr,"Must give a histogram or an image as input!\n");
+        fprintf(errfile,"Must give a histogram or an image as input!\n");
         exit(1);
     }
 
@@ -362,7 +454,7 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
         /***** decide image kind and fill derived info
          ***** in job->TheImage
         **********************************************/
-        PeekImage(&job->TheImage);
+        if (!PeekImage(&job->TheImage)) FatalError("Could not peek into image file");
     }
 
     /**********************************************************
@@ -372,11 +464,11 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
     if (job->NumTables > job->TheImage.NumComponents)
     {
         if (!job->Silent)
-            fprintf(stderr,"Number of units (%d) reset to number of color planes (%d)\n",job->NumTables,job->TheImage.NumComponents);
+            fprintf(errfile,"Number of units (%d) reset to number of color planes (%d)\n",
+                    job->NumTables,job->TheImage.NumComponents);
         job->NumTables = job->TheImage.NumComponents;
     }
 
-    job->TableRowSize = RoundOff(job->BppMax * ((FFLOAT) job->BppScale)) + 2;
 
 
     for (i=0; i<job->TheImage.NumComponents; i++)
@@ -386,7 +478,7 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
         {
 
             if (!job->Silent)
-                fprintf(stderr, "Resetting vertical samp factor for plane %d to %d\n",
+                fprintf(errfile, "Resetting vertical samp factor for plane %d to %d\n",
                         i,job->TheImage.InSamplingFactor[i][0]);
             job->TheImage.OutSamplingFactor[i][0] =
                 job->TheImage.InSamplingFactor[i][0];
@@ -397,7 +489,7 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
         {
 
             if (!job->Silent)
-                fprintf(stderr, "Resetting horizontal samp factor for plane %d to %d\n",
+                fprintf(errfile, "Resetting horizontal samp factor for plane %d to %d\n",
                         i,job->TheImage.InSamplingFactor[i][1]);
             job->TheImage.OutSamplingFactor[i][1] =
                 job->TheImage.InSamplingFactor[i][1];
@@ -415,6 +507,17 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
                 job->TheImage.NumCols) h++;
         job->NumBlocks[i] = ((FFLOAT) (h*v));
     }
+
+    if ((job->bppplane >= 0) && (job->bppplane < job->TheImage.NumComponents))
+    {
+        job->NumPixelsForBpp =
+            job->NumBlocks[job->bppplane]*((FFLOAT) 64.0);
+    }
+    else
+    {
+        job->bppplane = -1;
+    }
+
     for (i=job->NumTables; i<job->TheImage.NumComponents; i++)
     {
         job->NumBlocks[job->NumTables-1] += job->NumBlocks[i];
@@ -433,16 +536,54 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
     job->LogTotalPeakSq = ftemp +
                           ((FFLOAT) log10((double) job->TotalNumPixels));
 
-    if (job->NumTables == 1)
+
+    if (job->bppplane == -1) job->NumPixelsForBpp = job->TotalNumPixels;
+
+    for (i=0; i<job->NumTables; i++)
     {
-        job->bppWeight[0] = 1.0;
+        job->bppWeight[i] = job->NumPixels[i]/job->NumPixelsForBpp;
+    }
+
+    if (job->WeightedComps)
+    {
+        /* normalize weights */
+        ftemp = ((FFLOAT) 0.0);
+        for (n=0; n<job->NumTables; n++)
+        {
+            ftemp += job->CompWeights[n];
+        }
+        if (ftemp == 0.0) FatalError("Bad weights in -pweights");
+        ftemp /= ((FFLOAT) job->NumTables);
+        for (n=0; n<job->NumTables; n++)
+        {
+            job->CompWeights[n] /= ftemp;
+        }
     }
     else
     {
-        for (i=0; i<job->NumTables; i++)
+        /* avoid a silly test later */
+        job->WeightedComps = TRUE;
+        for (n=0; n<job->NumTables; n++)
         {
-            job->bppWeight[i] = job->NumPixels[i]/job->TotalNumPixels;
+            job->CompWeights[n] = ((FFLOAT) 1.0);
         }
+    }
+
+    if (job->UseLagrangian)
+    {
+        job->opt_method.lagr.ErrScale = job->NumPixelsForBpp;
+        job->opt_method.lagr.NumHooks = NUM_HOOKS;
+        if ((job->opt_method.lagr.BppHook = (FFLOAT *)
+                                            calloc(1,sizeof(FFLOAT)*job->opt_method.lagr.NumHooks*3)) ==NULL)
+            FatalError("GetParams out of memory");
+        job->opt_method.lagr.LambdaHook = job->opt_method.lagr.BppHook +
+                                          job->opt_method.lagr.NumHooks;
+        job->opt_method.lagr.ErrHook = job->opt_method.lagr.LambdaHook +
+                                       job->opt_method.lagr.NumHooks;
+    }
+    else
+    {
+        job->opt_method.dp.TableRowSize = RoundOff(job->opt_method.dp.BppMax * ((FFLOAT) job->opt_method.dp.BppScale)) + 2;
     }
 
     if (job->HistFilePresent)
@@ -450,7 +591,7 @@ extern void GetParams(OptimJob *job, int argc, char *argv[])
         if ((job->DumpStats) || (job->OnlyDumpStats))
         {
             if (!job->Silent)
-                fprintf(stderr,"No image specified: -stats/-onlystats ignored\n");
+                fprintf(errfile,"No image specified: -stats/-onlystats ignored\n");
             job->DumpStats = FALSE;
             job->OnlyDumpStats = FALSE;
         }
@@ -492,10 +633,25 @@ extern void DumpJobChars(OptimJob *job, FILE *fp)
     else fprintf(fp,"none\n");
 
     fprintf(fp,"#Number of qtables used: %d\n",job->NumTables);
-    fprintf(fp,"#Optimization parameters: \n");
-    fprintf(fp,"#\tMaxBpp = %lf, BppScale = %d, DC clamp = %d\n",
-            (double) job->BppMax, job->BppScale, job->DCclamp);
-
+    if (job->UseLagrangian)
+    {
+        fprintf(fp,"#Optimization parameters (method: Lagrangian): \n");
+        fprintf(fp,"#\t DC clamp = %d, ThreshSpan = %d\n",
+                job->DCclamp, job->ThreshSpan);
+    }
+    else
+    {
+        fprintf(fp,"#Optimization parameters (method: Dynamic Programming): \n");
+        fprintf(fp,"#\tMaxBpp = %lf, BppScale = %d, DC clamp = %d, ThreshSpan = %d\n",
+                (double) job->opt_method.dp.BppMax,
+                job->opt_method.dp.BppScale, job->DCclamp,
+                job->ThreshSpan);
+    }
+    if (job->useCorrection)
+    {
+        fprintf(fp,"#\tThe predicted Bpp is corrected by adding %lf in the end,\n",job->addToTableBpp);
+        fprintf(fp,"#\t\twhich is the error at asking bpp = %lf\n",job->correctionBpp);
+    }
     fprintf(fp,"#\n");
 }
 

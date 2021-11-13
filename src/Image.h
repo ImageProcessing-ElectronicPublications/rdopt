@@ -1,35 +1,7 @@
-/*
-** Copyright 1995 by Viresh Ratnakar, Miron Livny
-**
-** Permission to use and copy this software and its documentation
-** for any non-commercial purpose and without fee is hereby granted,
-** provided that the above copyright notice appear in all copies and that
-** both that copyright notice and this permission notice appear in
-** supporting documentation.
-**
-**
-** The University of Wisconsin and the copyright holders make no
-** representations about the suitability of this software for any
-** purpose.  It is provided "as is" without express or implied warranty.
-**
-**
-** THE UNIVERSITY OF WISCONSIN AND THE COPYRIGHT HOLDERS DISCLAIM ALL
-** WARRANTIES WITH REGARD TO THIS SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES
-** OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE UNIVERSITY OF
-** WISCONSIN OR THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT
-** OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
-** OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE
-** OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE
-** OR PERFORMANCE OF THIS SOFTWARE.
-**
-** Author:  Viresh Ratnakar
-** Email:   ratnakar@cs.wisc.edu
-**
-*/
-
 #ifndef IMAGE_H_INCLUDED
 #define IMAGE_H_INCLUDED
 #include <stdio.h>
+
 
 #include "precision.h"
 
@@ -63,8 +35,9 @@ SAMPLEBITS must be 8,10,12,or16
 
 #endif /* MAXSAMPLE */
 
+
 #ifndef STRLENMAX
-#define STRLENMAX 200
+#define STRLENMAX 400
 #endif
 
 #ifndef boolean
@@ -93,6 +66,7 @@ SAMPLEBITS must be 8,10,12,or16
 #define IM_PGM 6     /* not an actual kind */
 #define IM_PPM 7     /* not an actual kind */
 #define IM_PNM 8     /* not an actual kind */
+#define IM_NOT_RAW 9 /* not an actual kind */
 
 #define ImKindString(k) \
   ((k==IM_RAW)? "RAW" : \
@@ -103,13 +77,15 @@ SAMPLEBITS must be 8,10,12,or16
   ((k==IM_PGM)? "PGM" : \
   ((k==IM_PPM)? "PPM" : \
   ((k==IM_PNM)? "PNM" : \
-		"Unknown"))))))))
+  ((k==IM_NOT_RAW)? "Not-RAW" : \
+		"Unknown")))))))))
 
 /** ImKind inclusions:
   apart from <kind> < <kind>,
 
   PGM_ASCII, PGM_RAW < PGM, PNM
   PPM_ASCII, PPM_RAW < PPM, PNM
+   everything < NOT_RAW, except RAW
 **/
 
 #define ImKindSubSetOf(a,b) \
@@ -118,12 +94,12 @@ SAMPLEBITS must be 8,10,12,or16
        ((b==IM_PGM) || (b==IM_PNM))) ? 1 : \
      ((((a==IM_PPM_ASCII) || (a==IM_PPM_RAW)) && \
        ((b==IM_PPM) || (b==IM_PNM))) ? 1 : \
-	     0)))
+     (((b==IM_NOT_RAW) && (a!=IM_RAW) && (a!=IM_UNKNOWN)) ? 1 : \
+	     0))))
 
 
 
-typedef enum ColorConvTypeEnum {NONE,RGBtoYCC,RGBto2YCC} ColorConvType;
-
+typedef enum ColorConvTypeEnum {NONE,RGBtoYCC,RGBto2YCC,YCCtoRGB,YCC2toRGB} ColorConvType;
 /******* images ****************/
 struct ImageStruct
 {
@@ -151,10 +127,28 @@ struct ImageStruct
     ColorConvType ColorConvKind; /* default: NONE */
     boolean IsErrImage; /* Default: FALSE */
 
+    /** info for saving image **/
+    int SaveImKind; /* Default: IM_RAW options: IM_PNM or IM_PGM or IM_PPM */
+    ColorConvType SaveColorConv; /* default: NONE options YCCtoRGB, YCC2toRGB */
+
+    FILE * errfile; /* fatal error messages printed here.. stderr by default */
+
+    int ImFileFd;
+    int UserGaveFd;
+    unsigned long ImBytes; /* needs to be set if and only if all the
+		       following are true:
+		       1. Image is coming on stdin
+		       2. Image needs a filter to be forked
+			  (not PNM and not RAW, currently)
+		       3. Other end of pipe is *not* going
+			  to be closed immediately after
+			  sending the image data (for example,
+			  if the other end is going to read
+			  some info back on the same fd) */
     /********** PRIVATE DATA*****************/
     boolean ImExists[MAXCOMPONENTS];
-    int ImFileFd;
-    unsigned char FirstTwoChars[2];
+    char ImFilterUsed[STRLENMAX];
+    unsigned char FirstFiveChars[5];
     Pixel *Im[MAXCOMPONENTS];
     /* each 2-D component will be stored in row-major order in the
        appropriate Im[][] array
@@ -165,24 +159,32 @@ struct ImageStruct
 typedef struct ImageStruct Image;
 
 
+static int GetImKind(Image *Im);
+
+static void PNMGetParams(Image *Im, int *maxv);
+
+static int PNMReadImage(Image *Im);
+
+
 /********************** prototypes ************************/
 
 
 extern void PrintImgChars(Image *Im);
 
 extern void InitImage(Image *Im);
-extern void PeekImage(Image *Im);
+extern int PeekImage(Image *Im);
 
-extern void ReadImgComp(Image *Im, int cnum);
+extern int ReadImgComp(Image *Im, int cnum);
 
 extern void FreeImgComp(Image *Im, int cnum);
 
+extern int SaveImg(Image *Im, char * fname);
 
-static int GetImKind(Image *Im);
+extern int SaveImgComp(Image *Im, int cnum, char * fname); /* will not do conversions,
+						    sampling */
 
-static void PNMGetParams(Image *Im, int *maxv);
 
-static void PNMReadImage(Image *Im);
+extern int DoSubSampling(Image *Im, int cnum);
 
 #endif /* IMAGE_H_INCLUDED */
 

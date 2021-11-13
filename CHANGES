@@ -1,0 +1,74 @@
+
+
+RD-OPT ver2.0 has changed from ver1.0, in the following ways:
+-------------------------------------------------------------
+
+1. Bits per pixel (bpp) reported for images with more than
+   one plane used to be
+     total # of bits / (sum of # pixels in all planes)
+   It still is the same, but now you can specify the option
+     -bppplane n
+   which would make the denominator the # of pixels in plane n.
+   For example, for RGB images converted to YCrCb and subsampled
+   in Cr and Cb, you can specify "-bppplane 0" to get the bpp
+   as (#bits/(width x height)).
+   ** "-bppplane 0" should probably be used always, as that is
+      the conventional meaning of "bits-per-pixel"
+
+2. Default DC clamp used to be 12, it is 255 now
+
+3. Weighted PSNR: there was a bug which has been removed.
+   Also, the coefficient  weights can be different in different
+   units. So the option is now set as
+     -weights n <weights_file>
+   where n is the unit number
+
+4. Unit weights: each unit can be weighed differently for
+   calculating the average distortion using the option
+     -pweights w0[,w1,..]
+
+5. Optimization method: Used to be dynamic programming, which is
+   still the default, but you can set it to lagrangian by
+   specifying
+     -method lagrangian
+   Lagrangian will usually be faster, except for very high values
+   in the -thresh option (see below). The "-bppscale" and
+   "-bppmax" options will be ignored if the method is lagrangian.
+
+6. Command interface:
+     see the file BETTER_README.. essentially the same as before,
+     but you can now compress from the command line if you have
+     IJG's cjpeg. You can also set corrections to reported bpp
+     using the actual bpp if you have cjpeg.
+
+7. Thresholding:
+     The main improvement: global zeroing-off levels for DCT
+     coefficients can be determined, for better R-D performance.
+     Use the option
+       -thresh <tmax>
+     This will generate thresholding tables for DCT coeffs, The
+     higher the value of tmax, the greater the span of thresholds
+     tried. All thresholds in the range [q/2 .. (q+tmax)/2] will
+     be tried at every qtable entry q, in steps of 0.5
+     See BETTER_README for details.
+
+8. Bpp correction: there are two ways to specify this. You can
+     use the "-correct <cbpp>" option, and/or issue any number
+     of "correct <cbpp>" commands at the command interface. In
+     either case, IJG's cjpeg will be used to compress the image 
+     using the qtable(s) found for the rate <cbpp>, and subsequently
+     reported bpp's will be correceted by the difference between
+     the actual bpp and <cbpp>.
+
+9. Plot: you can specify -pbppmax to set the max bpp that will
+    be used for -plot. Default is 1.0.
+
+10. -dcdpcm option: previously, by default an approximation of DPCM
+   coding was used to estimate entropy of quantized and DPCM-coded
+   DC coeffs. It is turned off be default now, but you can turn it
+   on with this option. Without -dcdpcm, the distortion estimate is
+   slightly more accurate, but it is not clear whether the rate 
+   estimate is more or less accurate. In any case, the difference
+   is usually so small that this can be swept under the rug.
+
+
